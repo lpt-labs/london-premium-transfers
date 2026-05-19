@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Next.js build output
+.next/
+out/
+build/
+dist/
+
+# Misc OS / IDE clutter
+.DS_Store
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Env files — never commit secrets
+.env
+.env*.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Keys / certs — never commit
+*.pem
+*.key
+
+# VS Code: ignore everything except shared config we want in the repo
+.vscode/*
+!.vscode/mcp.json
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# TypeScript build info
+*.tsbuildinfo
+next-env.d.ts
+
+# Vercel deploy metadata
+.vercel
+
+# Test coverage reports
+coverage/
+
+# Agent scratchpads that should never leave the local machine
+.agent-scratch/
