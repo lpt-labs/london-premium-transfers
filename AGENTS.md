@@ -10,7 +10,7 @@ Most production code in this repo is written by agents, not humans. To keep deli
 - CODEOWNERS — high-risk paths require the owner's approval.
 - Branch protection on `main` — no direct pushes, PRs only.
 - CI status checks (added incrementally) — plan-gate, drift-check, eval, path-guard, etc.
-- Hooks (`.github/hooks/`) — pre-tool-use blocks for unsafe operations.
+- Hooks — pre-tool-use blocks for unsafe operations. Claude reads `.claude/settings.json`; Copilot reads `.github/hooks/`. Both ecosystems are configured in this repo; Claude is the active executor today.
 
 If a rule below conflicts with what the user just said in chat, **ask before acting**. The user's intent wins, but only when stated explicitly for the current task.
 

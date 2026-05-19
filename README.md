@@ -19,13 +19,15 @@ This repository serves two goals:
 
 ## How agents work in this repo
 
-Most production code is written by **GitHub Copilot Coding Agent**, not by hand. Humans (and Claude Code, used as planner/reviewer) define structured tasks via the `agent-task` issue template; the agent opens a PR; merge is gated by:
+Most production code is written by an **AI coding agent**, not by hand. Humans define structured tasks via the `agent-task` issue template; the agent opens a PR; merge is gated by:
 
 - A required `## Plan` section in the PR body.
 - CI status checks (lint, typecheck, build, eval, drift, path-guard).
 - CODEOWNERS review.
 
-Detailed agent operating contract lands in `AGENTS.md` (PR 2). Escalation, retry, and rollback policy land in `docs/AGENT_PLAYBOOK.md` (PR 7).
+The repository keeps configuration for two agent ecosystems side by side. **Claude Code** (under `.claude/`) is the active executor. **GitHub Copilot** (under `.github/copilot-instructions.md`, `.github/chatmodes/`, `.github/prompts/`, `.github/agents/`, `.github/hooks/`) is configured as a dormant alternative — the files are kept valid and exam-shaped, ready to activate when a license is available.
+
+The full operating contract lives in [`AGENTS.md`](AGENTS.md). Escalation, retry, and rollback policy lands in `docs/AGENT_PLAYBOOK.md`.
 
 ## Local development
 
