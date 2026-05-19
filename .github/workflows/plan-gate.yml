@@ -1,0 +1,84 @@
+name: Plan Gate
+
+# Blocks PR merge if the PR description is missing the `## Plan (required)`
+# section or its Goal/Steps fields are empty. Configure as a required status
+# check in branch protection so the gate is enforced at merge time.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+    branches: [main]
+
+# Least-privilege: this job only reads PR metadata. No write scopes.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  require-plan:
+    name: Plan present and filled
+    # Defensive trigger guard — even though `on:` is only `pull_request`,
+    # this protects against accidental misfires if someone adds more triggers later.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR body
+        # PR body is passed via env var, never interpolated directly into the
+        # shell — that would be a command-injection vector since authors
+        # control PR descriptions.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+
+          fail() {
+            echo "::error title=Plan Gate failed::$1"
+            echo ""
+            echo "PR: $PR_URL"
+            echo "Title: $PR_TITLE"
+            echo ""
+            echo "Open the PR description and ensure it contains:"
+            echo "  ## Plan (required)"
+            echo "  - **Goal:** <one sentence>"
+            echo "  - **Steps:**"
+            echo "    1. <action>"
+            echo "    2. <action>"
+            echo ""
+            echo "See .github/pull_request_template.md for the full schema."
+            exit 1
+          }
+
+          if [ -z "${PR_BODY:-}" ]; then
+            fail "PR body is empty."
+          fi
+
+          if ! grep -qE "^## Plan \(required\)" <<<"$PR_BODY"; then
+            fail "PR body is missing the '## Plan (required)' section."
+          fi
+
+          # Goal must have content after the colon (not just '<one sentence>'
+          # placeholder text, and not blank).
+          goal_line=$(grep -E '^\- \*\*Goal:\*\*' <<<"$PR_BODY" || true)
+          if [ -z "$goal_line" ]; then
+            fail "Missing '- **Goal:**' line under the Plan section."
+          fi
+          goal_content=$(sed -E 's/^\- \*\*Goal:\*\*\s*//' <<<"$goal_line")
+          if [ -z "$goal_content" ] || [[ "$goal_content" =~ ^\<.*\>$ ]]; then
+            fail "Goal is empty or still contains the template placeholder."
+          fi
+
+          # Steps must have at least one numbered step with content.
+          # Look for indented '1. <text>' under the **Steps:** line.
+          steps_block=$(awk '
+            /^\- \*\*Steps:\*\*/ { in_steps = 1; next }
+            /^\- \*\*/ && in_steps { in_steps = 0 }
+            in_steps { print }
+          ' <<<"$PR_BODY")
+
+          if ! grep -qE '^\s+[0-9]+\.\s+\S' <<<"$steps_block"; then
+            fail "Steps section is empty — needs at least one numbered step with content."
+          fi
+
+          echo "::notice title=Plan Gate passed::PR body contains a Plan with Goal and at least one Step."
