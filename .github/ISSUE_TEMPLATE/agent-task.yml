@@ -1,0 +1,109 @@
+name: Agent Task
+description: Structured task for the GitHub Copilot Coding Agent. Defines inputs, outputs, and success criteria so the agent can plan and execute reliably.
+title: "[agent] "
+labels: ["agent-task"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Task contract
+
+        This issue defines a bounded task for the coding agent. Fill every field — the agent will refuse to start without them.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One sentence — what outcome are we after? (Not how.)
+      placeholder: e.g. "Add a /fleet page that lists vehicles with image, name, capacity, and CTA."
+    validations:
+      required: true
+
+  - type: textarea
+    id: inputs
+    attributes:
+      label: Inputs
+      description: What the agent needs — issue context, links, files to read, constraints.
+      placeholder: |
+        - Design reference: docs/design/fleet.md
+        - Existing components to reuse: components/Card.tsx
+        - Brand tokens: lib/design-tokens.ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Repository scope (allowed paths)
+      description: Directories the agent is allowed to modify. Anything outside this list will be flagged by drift detection.
+      placeholder: |
+        - app/fleet/**
+        - components/Fleet*.tsx
+        - lib/fleet.ts
+    validations:
+      required: true
+
+  - type: textarea
+    id: outputs
+    attributes:
+      label: Expected outputs
+      description: What the agent should produce — PR contents, files, artifacts.
+      placeholder: |
+        - Pull request with a structured plan in the description
+        - New page at /fleet rendering the vehicle list
+        - Unit tests for the fleet data loader
+        - Eval scorecard passing (LH ≥ 90, axe 0 violations)
+    validations:
+      required: true
+
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success criteria (verifiable)
+      description: How we'll know it's done. Each item must be testable, not opinion.
+      placeholder: |
+        - [ ] Required CI checks pass (lint, typecheck, build, eval, drift)
+        - [ ] /fleet page renders 6+ vehicles with no console errors
+        - [ ] Keyboard navigation reaches every CTA
+        - [ ] Lighthouse a11y score ≥ 95
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: What the agent must NOT do.
+      value: |
+        - No edits to .github/workflows/** unless the `infra-change` label is added
+        - No new secrets introduced
+        - No direct pushes to main
+        - No new top-level dependencies without justification in the PR plan
+    validations:
+      required: true
+
+  - type: dropdown
+    id: autonomy
+    attributes:
+      label: Autonomy level
+      description: From the risk table in AGENTS.md. Higher levels require stricter review.
+      options:
+        - L0 — automated (docs/**, *.md only)
+        - L1 — suggest only (comments, no code)
+        - L2 — PR with 1 review (default for app code)
+        - L3 — PR with CODEOWNERS + multi-review (workflows, deps, infra)
+        - L4 — environment approval required (production deploys)
+      default: 2
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback / escalation plan
+      description: If this breaks something after merge, what's the revert path? Who escalates?
+      placeholder: |
+        - Revert via .github/workflows/agent-rollback.yml (input the merge commit SHA)
+        - If revert insufficient, escalate to @mafaq229 with the `needs-human` label
+    validations:
+      required: true

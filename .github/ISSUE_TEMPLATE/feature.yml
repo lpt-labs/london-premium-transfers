@@ -1,0 +1,29 @@
+name: Feature Request
+description: A new feature or enhancement for human discussion. Use "Agent Task" instead if the work is ready to delegate to Copilot.
+title: "[feature] "
+labels: ["feature", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user/business problem does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: textarea
+    id: success
+    attributes:
+      label: How we'd measure success
