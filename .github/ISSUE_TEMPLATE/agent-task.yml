@@ -1,5 +1,5 @@
 name: Agent Task
-description: Structured task for the GitHub Copilot Coding Agent. Defines inputs, outputs, and success criteria so the agent can plan and execute reliably.
+description: Structured task for the AI coding agent (Claude Code or GitHub Copilot). Defines inputs, outputs, and success criteria so the agent can plan and execute reliably.
 title: "[agent] "
 labels: ["agent-task"]
 body:
