@@ -25,7 +25,7 @@ Most production code is written by an **AI coding agent**, not by hand. Humans d
 - CI status checks (lint, typecheck, build, eval, drift, path-guard).
 - CODEOWNERS review.
 
-The repository keeps configuration for two agent ecosystems side by side. **Claude Code** (under `.claude/`) is the active executor. **GitHub Copilot** (under `.github/copilot-instructions.md`, `.github/chatmodes/`, `.github/prompts/`, `.github/agents/`, `.github/hooks/`) is configured as a dormant alternative — the files are kept valid and exam-shaped, ready to activate when a license is available.
+The repository keeps configuration for two agent ecosystems side by side. **Claude Code** (under `.claude/`) is the active executor. **GitHub Copilot** (under `.github/copilot-instructions.md`, `.github/agents/`, `.github/prompts/`, `.github/hooks/`) is configured as a dormant alternative — the files are kept valid and exam-shaped, ready to activate when a license is available.
 
 The full operating contract lives in [`AGENTS.md`](AGENTS.md). Escalation, retry, and rollback policy lands in `docs/AGENT_PLAYBOOK.md`.
 
