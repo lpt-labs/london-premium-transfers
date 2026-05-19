@@ -46,4 +46,3 @@ scripts/        One-off scripts
 docs/           Agent governance docs and audit
 .github/        Templates, instructions, prompts, chat modes, agents, hooks, workflows
 ```
-test
