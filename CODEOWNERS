@@ -1,0 +1,27 @@
+# Syntax: <path-pattern>  <@owner> [@owner ...]
+# Last matching pattern wins.
+#
+# For solo practice every owner is the same user. The structure is what
+# matters; once a real team joins, swap usernames for team handles.
+
+# Default — everything not matched below
+*                                       @mafaq229
+
+# Workflow / automation surface (L3 in the autonomy table)
+/.github/workflows/                     @mafaq229
+/.github/actions/                       @mafaq229
+/.github/hooks/                         @mafaq229
+/.github/agents/                        @mafaq229
+
+# Agent instruction surface — changes here affect every future agent PR
+/.github/copilot-instructions.md        @mafaq229
+/.github/instructions/                  @mafaq229
+
+# Build / dependency configuration
+next.config.ts                          @mafaq229
+package.json                            @mafaq229
+pnpm-lock.yaml                          @mafaq229
+
+# Infrastructure (reserved for future use)
+/infra/                                 @mafaq229
+/security/                              @mafaq229
