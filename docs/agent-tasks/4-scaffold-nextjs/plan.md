@@ -6,6 +6,7 @@
 - **Goal:** Stand up a working Next.js 16 (App Router) + Tailwind v4 + TypeScript foundation with brand design tokens extracted from the supplied design, so feature PRs build on a stable dev server with the correct palette.
 - **Scope (paths/files):**
   - `package.json`, `pnpm-lock.yaml`
+  - `pnpm-workspace.yaml` (added during scaffold — pnpm 11 gates native build scripts here)
   - `tsconfig.json`
   - `next.config.ts`
   - `postcss.config.mjs`
@@ -47,6 +48,8 @@
     *Mitigation:* parse `index.html` for CSS custom properties / inline styles; if ambiguous, surface the candidate palette to the user before encoding.
   - *Risk:* scaffolder adds extra dependencies (e.g. analytics, fonts) beyond the issue's "defaults only" constraint.
     *Mitigation:* accept only interactive defaults; if any unexpected dep appears, flag it in the PR body and ask before keeping.
+  - *Risk:* pnpm 11 auto-generates `pnpm-workspace.yaml` to gate native build scripts (sharp, unrs-resolver); this file was not in the issue's original scope.
+    *Mitigation:* added to *Scope* above; both builds approved via `allowBuilds: true` so `pnpm install` runs clean. sharp is required by `next/image` for production image optimization, unrs-resolver speeds up ESLint module resolution. Future scaffolder versions may emit additional fields here — review before committing.
   - *Risk:* `app/globals.css` `@theme` block and `lib/design-tokens.ts` drift apart as two sources of truth.
     *Mitigation:* `globals.css` is the only place tokens are registered with Tailwind; `lib/design-tokens.ts` is the TypeScript-consumable mirror. Document the relationship in `app/CLAUDE.md`. Convention, not enforcement.
 - **Rollback / escalation plan:**
