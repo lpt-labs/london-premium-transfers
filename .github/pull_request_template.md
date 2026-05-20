@@ -2,19 +2,19 @@
   Every PR (human or agent) must fill the Plan and Evidence sections.
   The `plan-gate` workflow blocks merge if the Plan is missing or empty.
 
-  Two ways to fill the Plan block below:
-    1. Auto-sync (preferred): include `docs/agent-tasks/<task-id>/plan.md`
-       in the PR diff. The `sync-plan-to-pr.yml` workflow will replace the
-       content between the PLAN:BEGIN / PLAN:END markers with the file's
-       Goal-through-Rollback bullets.
-    2. Manual paste: replace the placeholder bullets between the markers
-       with your plan content. Useful for PRs that don't have an associated
-       plan.md (e.g. small docs fixes) or when the sync workflow is down.
+  How to fill the Plan block:
+    - If this PR has an associated docs/agent-tasks/<task-id>/plan.md file,
+      paste its Goal-through-Rollback bullets between the PLAN:BEGIN and
+      PLAN:END markers below. The plan.md file and this template share the
+      same bullet format on purpose — it's a literal copy-paste.
+    - For small PRs without a plan.md (typo fix, dependency bump, single-
+      line change), edit the placeholder bullets between the markers
+      directly. The bullets are still required; plan-gate enforces it.
 -->
 
 ## Plan (required)
 
-<!-- PLAN:BEGIN — do not edit these marker comments; content between them may be auto-generated -->
+<!-- PLAN:BEGIN — paste plan.md content between this and the PLAN:END marker below -->
 
 - **Goal:**
 - **Scope (paths/files):**
