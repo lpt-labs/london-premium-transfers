@@ -1,0 +1,24 @@
+version: 2
+updates:
+  # ── npm (pnpm project) ─────────────────────────────────────────────────────
+  # Dependabot treats pnpm projects as the npm ecosystem.
+  # open-pull-requests-limit caps concurrent PRs to avoid queue flooding.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  # ── GitHub Actions ──────────────────────────────────────────────────────────
+  # Bumps pinned action SHAs in .github/workflows/*.yml.
+  # infra-change label is required because action bumps touch L3 paths
+  # (.github/workflows/**) and must go through the CODEOWNERS review path.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "infra-change"
