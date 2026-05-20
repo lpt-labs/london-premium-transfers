@@ -1,46 +1,44 @@
 # Plan: <one-line task summary>
 
-> Copy this file to `docs/agent-tasks/<task-id>/plan.md` at the start of a task.
-> `<task-id>` is usually the issue number (e.g. `42-fleet-page`).
-> Keep this file accurate as the task evolves — it's the source of truth for drift detection.
+<!--
+  This file's section structure mirrors `.github/pull_request_template.md`
+  intentionally. Copy the contents from "- **Goal:**" through the end of the
+  rollback section into the `## Plan (required)` block of the PR description
+  (or let the `sync-plan-to-pr.yml` workflow do it automatically by placing
+  this file under `docs/agent-tasks/<task-id>/plan.md` and pushing — see
+  PLAN:BEGIN / PLAN:END markers in the PR template).
 
-## Goal
+  Manual paste also works as a fallback if the workflow ever fails.
 
-One sentence. What outcome are we after? (Not how.)
+  Keep this file accurate as the task evolves — it's the durable source of
+  truth that drift-check (PR 10) compares against the actual diff.
 
-## Scope (paths/files)
+  Naming convention: `<task-id>` is the issue number plus a short slug, e.g.
+  `4-scaffold-nextjs`, `42-fleet-page`.
+-->
 
-The directories or files the agent is permitted to modify. Anything outside this list will be flagged by `drift-check`. Be specific.
+> Issue: [#NN](https://github.com/lpt-labs/london-premium-transfers/issues/NN)
+> Branch: `feat/<slug>` or `chore/<slug>`
 
-- `app/...`
-- `components/...`
-- `lib/...`
-
-## Steps
-
-Ordered list of concrete actions the agent will take. Reviewers compare this against the eventual commits.
-
-1.
-2.
-3.
-
-## Success criteria (verifiable)
-
-Each item must be testable by another person reading the diff or a workflow run.
-
-- [ ] Required CI checks pass (lint, typecheck, build, plan-gate, eval, drift, path-guard).
-- [ ] <feature-specific criterion 1>
-- [ ] <feature-specific criterion 2>
-
-## Risks + mitigations
-
-- *Risk:* …
-  *Mitigation:* …
-
-## Rollback / escalation plan
-
-- Rollback: `gh workflow run agent-rollback.yml -f sha=<merge-sha>` (once the workflow exists; until then, manual `git revert <merge-sha>` on a follow-up PR).
-- Escalation: add label `needs-human` and tag @mafaq229.
+- **Goal:** One sentence. What outcome are we after? (Not how.)
+- **Scope (paths/files):**
+  - `app/...`
+  - `components/...`
+  - `lib/...`
+- **Steps:**
+  1.
+  2.
+  3.
+- **Success criteria (verifiable):**
+  - [ ] Required CI checks pass (plan-gate today; eval/drift/path-guard land in later PRs)
+  - [ ] <feature-specific criterion 1>
+  - [ ] <feature-specific criterion 2>
+- **Risks + mitigations:**
+  - *Risk:* …
+    *Mitigation:* …
+- **Rollback / escalation plan:**
+  - Rollback command: `gh workflow run agent-rollback.yml -f sha=<merge-sha>` (once the workflow exists; until then, manual `git revert <merge-sha>` on a follow-up PR).
+  - Escalation: add label `needs-human` and tag @mafaq229.
 
 ## Autonomy level
 
@@ -51,3 +49,7 @@ From the table in `AGENTS.md`. Pick one:
 - [ ] L2 (PR + 1 review — default for app code)
 - [ ] L3 (CODEOWNERS + multi-review — workflows/infra)
 - [ ] L4 (environment approval — production deploys)
+
+## Workflow choice
+
+Plan-first | Plan + Execution — with one-line reason. See `docs/PLAN_FIRST_VS_PLAN_EXEC.md`.
