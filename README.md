@@ -31,20 +31,48 @@ The full operating contract lives in [`AGENTS.md`](AGENTS.md). Escalation, retry
 
 ## Local development
 
-> Setup steps land in PR 4 when the Next.js scaffold is added.
+### Prerequisites
+
+- Node.js 20+ (use [Corepack](https://nodejs.org/api/corepack.html) or a version manager; Node 25 is currently tested locally)
+- pnpm 10+ — install with `corepack enable` or `brew install pnpm`
+
+### Install + run
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev          # → http://localhost:3000
 ```
 
-## Project structure (planned)
+The placeholder home page should render with a warm-white background, near-black headline, and an italic Instrument-Serif word in the heading — that's the brand wiring proving itself end-to-end. Tokens live in [`lib/design-tokens.ts`](lib/design-tokens.ts); Tailwind utilities are wired in [`app/globals.css`](app/globals.css).
+
+### Other useful commands
+
+```bash
+pnpm build              # production build
+pnpm start              # serve the production build
+pnpm lint               # ESLint
+pnpm exec tsc --noEmit  # type-check without emitting JS
+```
+
+### Troubleshooting
+
+- **`pnpm install` errors with `ERR_PNPM_IGNORED_BUILDS`** — only `sharp` and `unrs-resolver` are approved (see [`pnpm-workspace.yaml`](pnpm-workspace.yaml)). If a new dependency needs a native build script, **don't run `pnpm approve-builds` blindly** — add it to `pnpm-workspace.yaml` in a PR so the change is reviewable.
+- **Fonts look wrong on first paint** — `next/font/google` downloads font files at build time, so an offline first install can produce a layout shift. Re-run `pnpm install` once you're online.
+
+## Project structure
 
 ```
-app/            Next.js App Router pages
-components/     React components
-lib/            Shared utilities, design tokens
-scripts/        One-off scripts
-docs/           Agent governance docs and audit
-.github/        Templates, instructions, prompts, chat modes, agents, hooks, workflows
+app/                  Next.js App Router pages, layout, global CSS, app-scoped CLAUDE.md
+lib/                  Shared utilities (lib/design-tokens.ts — brand tokens)
+public/               Static assets served verbatim
+docs/                 Agent governance docs, audit, agent-task plans
+.claude/              Claude Code config: settings, skills, agents
+.github/              Templates, instructions, prompts, agents, hooks, workflows
+package.json          Dependencies and scripts
+pnpm-lock.yaml        Resolved dependency graph (do not hand-edit)
+pnpm-workspace.yaml   pnpm 11 build-script allowlist
+next.config.ts        Next.js config (kept minimal; Vercel-native)
+tsconfig.json         TypeScript compiler config (strict)
+eslint.config.mjs     ESLint rules (eslint-config-next + TS rules)
+postcss.config.mjs    PostCSS pipeline wiring Tailwind v4
 ```
