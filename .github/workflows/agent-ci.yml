@@ -1,0 +1,233 @@
+name: Agent CI
+
+# CI for every PR: lint + typecheck + build, plus a single updating
+# PR-comment summary. Required check candidate once it's been green a few
+# times (configure under branch protection on `main`).
+
+on:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+        branches: [main]
+    # Manual re-run from the Actions tab. Useful when a transient failure
+    # blocks a PR and we want to retry without pushing an empty commit.
+    workflow_dispatch:
+
+# Least-privilege baseline. Per-job elevations below.
+permissions:
+    contents: read
+
+# If a new commit lands on the same PR while a previous run is mid-flight,
+# cancel the older run. Saves CI minutes and prevents the summary-comment
+# step from racing itself.
+concurrency:
+    group: agent-ci-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+# Workflow-level env. `vars.NODE_VERSION` is a *repo variable* (Settings →
+# Variables → Actions) — non-secret, editable in the UI without touching
+# code. The `||` provides a fallback if the var isn't set, so the workflow
+# stays self-contained for first-run.
+env:
+    NODE_VERSION: ${{ vars.NODE_VERSION || '24' }}
+    PNPM_VERSION: ${{ vars.PNPM_VERSION || '11' }}
+
+jobs:
+    # ------------------------------------------------------------------
+    # Job 1: lint
+    # ------------------------------------------------------------------
+    lint:
+        name: Lint
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        # expose this job's step output to downstream jobs (summary)
+        outputs:
+            result: ${{ steps.lint.outputs.result }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Enable Corepack (provides pnpm)
+              # Corepack is bundled with Node. Activating pnpm here lets
+              # actions/setup-node cache the pnpm store without a third-party
+              # action like pnpm/action-setup (which would need a SHA pin).
+              run: |
+                  corepack enable
+                  corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run lint
+              id: lint
+              # `set -o pipefail` so the tee'd pipeline preserves the eslint exit
+              # code. Without it, `tee` always returns 0 and we'd silently
+              # consider a failing lint as a pass.
+              run: |
+                  set -o pipefail
+                  pnpm lint 2>&1 | tee lint.log
+                  echo "result=pass" >> "$GITHUB_OUTPUT"
+
+    # ------------------------------------------------------------------
+    # Job 2: typecheck
+    # ------------------------------------------------------------------
+    typecheck:
+        name: Typecheck
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        outputs:
+            result: ${{ steps.typecheck.outputs.result }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Enable Corepack
+              run: |
+                  corepack enable
+                  corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run typecheck
+              id: typecheck
+              run: |
+                  set -o pipefail
+                  pnpm exec tsc --noEmit 2>&1 | tee typecheck.log
+                  echo "result=pass" >> "$GITHUB_OUTPUT"
+
+    # ------------------------------------------------------------------
+    # Job 3: build (also produces the run's traceable artifact)
+    # ------------------------------------------------------------------
+    build:
+        name: Build
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        needs: [lint, typecheck]  # build depends on lint and typecheck passing
+        runs-on: ubuntu-latest
+        outputs:
+            result: ${{ steps.build.outputs.result }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Enable Corepack
+              run: |
+                  corepack enable
+                  corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run build
+              id: build
+              run: |
+                  set -o pipefail
+                  mkdir -p ci-logs
+                  pnpm build 2>&1 | tee ci-logs/build.log
+                  # Capture a tiny build fingerprint for the artifact.
+                  if [ -f .next/BUILD_ID ]; then
+                      cp .next/BUILD_ID ci-logs/BUILD_ID
+                  fi
+                  echo "result=pass" >> "$GITHUB_OUTPUT"
+
+            - name: Upload build logs
+              # Per AGENTS.md "Traceability of artifacts": every artifact is named
+              # <purpose>-<run-id>-<sha> so it traces back to the run + the code.
+              uses: actions/upload-artifact@v4
+              with:
+                  name: logs-${{ github.run_id }}-${{ github.sha }}
+                  path: ci-logs/
+                  if-no-files-found: error
+                  retention-days: 14
+
+    # ------------------------------------------------------------------
+    # Job 4: summary — find-or-update a single PR comment
+    # ------------------------------------------------------------------
+    summary:
+        name: PR summary
+        # Only PRs get a comment; skip on workflow_dispatch.
+        if: always() && github.event_name == 'pull_request'
+        needs: [lint, typecheck, build]
+        runs-on: ubuntu-latest
+        # Elevated *only* on this job — least-privilege per-job, not workflow-wide.
+        permissions:
+            contents: read
+            pull-requests: write
+        steps:
+            - name: Find-or-update PR comment
+              uses: actions/github-script@v7
+              env:
+                  # Pass workflow values via env, never interpolate event-controlled
+                  # strings directly into the JS body. (PR title/body would be
+                  # author-controlled; run_id and sha are GitHub-controlled, but we
+                  # treat all interpolation uniformly to keep the habit.)
+                  LINT_RESULT: ${{ needs.lint.result }}
+                  TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+                  BUILD_RESULT: ${{ needs.build.result }}
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  ARTIFACT_NAME: logs-${{ github.run_id }}-${{ github.sha }}
+                  COMMIT_SHA: ${{ github.sha }}
+              with:
+                  script: |
+                        // Marker is an HTML comment — invisible in rendered Markdown,
+                        // but a reliable needle for find-or-update.
+                        const MARKER = '<!-- agent-ci:summary -->';
+                        const { LINT_RESULT, TYPECHECK_RESULT, BUILD_RESULT,
+                                RUN_URL, ARTIFACT_NAME, COMMIT_SHA } = process.env;
+
+                        const icon = (r) => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';
+                        const short = COMMIT_SHA.slice(0, 7);
+
+                        const body = [
+                            MARKER,
+                            `### Agent CI — ${short}`,
+                            '',
+                            `| Job | Result |`,
+                            `| --- | --- |`,
+                            `| Lint | ${icon(LINT_RESULT)} ${LINT_RESULT} |`,
+                            `| Typecheck | ${icon(TYPECHECK_RESULT)} ${TYPECHECK_RESULT} |`,
+                            `| Build | ${icon(BUILD_RESULT)} ${BUILD_RESULT} |`,
+                            '',
+                            `- Run: ${RUN_URL}`,
+                            `- Artifact: \`${ARTIFACT_NAME}\` (download from the run's Summary tab)`,
+                            `- Commit: \`${COMMIT_SHA}\``,
+                        ].join('\n');
+
+                        const { owner, repo } = context.repo;
+                        const issue_number = context.issue.number;
+
+                        // List existing comments and look for our marker.
+                        const comments = await github.paginate(
+                            github.rest.issues.listComments,
+                            { owner, repo, issue_number, per_page: 100 },
+                        );
+                        const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+                        if (existing) {
+                            await github.rest.issues.updateComment({
+                                owner, repo, comment_id: existing.id, body,
+                            });
+                            core.info(`Updated comment ${existing.id}`);
+                        } else {
+                            await github.rest.issues.createComment({
+                                owner, repo, issue_number, body,
+                            });
+                            core.info('Created new summary comment');
+                        }

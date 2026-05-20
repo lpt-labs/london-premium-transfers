@@ -1,0 +1,125 @@
+name: Vercel Deploy (reference)
+
+# Reference workflow documenting the Vercel-CLI deploy shape for this repo.
+#
+# This workflow does NOT run on `pull_request`. Per-PR previews come from
+# the Vercel GitHub integration (https://vercel.com/new), which is the
+# recommended path and posts a preview URL via the Vercel bot.
+#
+# This file exists so we have:
+#   1. A working manual deploy ("Run workflow" from the Actions tab) when
+#      the Vercel integration is down or we need an out-of-band deploy.
+#   2. A documented shape if we ever decide to move preview deploys
+#      in-repo (e.g. to deploy from a private fork the integration can't see).
+#
+# Secrets required (not set yet — file an `infra-change`-labeled task to add):
+#   VERCEL_TOKEN      — personal/CI token from https://vercel.com/account/tokens
+#   VERCEL_ORG_ID     — `vercel link`'s output, also visible in project settings
+#   VERCEL_PROJECT_ID — same source as above
+# Until those secrets are populated, this workflow will fail by design.
+
+on:
+    workflow_dispatch: # manual trigger only
+        inputs:
+            environment:
+                description: "Deploy target"
+                required: true
+                default: "preview"
+                type: choice
+                options:
+                    - preview
+                    - production
+
+# Least-privilege baseline; this workflow needs no repo writes at all.
+permissions:
+    contents: read
+
+# Don't queue multiple manual deploys against the same target — cancel
+# any in-flight run of the same environment if a new one is dispatched.
+concurrency:
+    group: vercel-deploy-${{ inputs.environment }}
+    cancel-in-progress: false
+
+env:
+    NODE_VERSION: ${{ vars.NODE_VERSION || '24' }}
+    PNPM_VERSION: ${{ vars.PNPM_VERSION || '11' }}
+
+jobs:
+    deploy:
+        name: Deploy to Vercel (${{ inputs.environment }})
+        # Defensive trigger guard — workflow_dispatch is the only trigger
+        # today, but this keeps the rule consistent across the repo.
+        if: github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        # Bind the job to a GitHub Environment matching the input. Configure
+        # `production` in Settings → Environments to require manual approval
+        # (and ideally restrict to deploys from `main`). `preview` runs
+        # without approval since it lands at an isolated URL.
+        environment: ${{ inputs.environment }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Enable Corepack
+              run: |
+                  corepack enable
+                  corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Install Vercel CLI
+              # Pinned to a major; bump intentionally via PR. Not vendored
+              # because re-installing once per run is cheap.
+              run: pnpm add -g vercel@latest
+
+            - name: Pull Vercel environment
+              # `vercel pull` writes a `.vercel/` directory tied to the
+              # selected target so the subsequent `build` matches what
+              # production/preview would produce.
+              env:
+                  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+                  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+                  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+              run: |
+                  vercel pull \
+                      --yes \
+                      --environment="${{ inputs.environment }}" \
+                      --token="$VERCEL_TOKEN"
+
+            - name: Build with Vercel
+              # Local build, then deploy the prebuilt output. Separates
+              # "build" from "ship" — Vercel doesn't re-execute the build
+              # script with elevated tokens.
+              env:
+                  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+                  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+                  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+              run: |
+                  if [ "${{ inputs.environment }}" = "production" ]; then
+                      vercel build --prod --token="$VERCEL_TOKEN"
+                  else
+                      vercel build --token="$VERCEL_TOKEN"
+                  fi
+
+            - name: Deploy prebuilt artifact
+              id: deploy
+              env:
+                  VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+                  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+                  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+              run: |
+                  set -o pipefail
+                  if [ "${{ inputs.environment }}" = "production" ]; then
+                      URL=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+                  else
+                      URL=$(vercel deploy --prebuilt --token="$VERCEL_TOKEN")
+                  fi
+                  echo "url=$URL" >> "$GITHUB_OUTPUT"
+                  echo "::notice title=Deployed::${{ inputs.environment }} → $URL"
