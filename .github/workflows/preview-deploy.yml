@@ -30,7 +30,7 @@ on:
                     - preview
                     - production
 
-                      # Least-privilege baseline; this workflow needs no repo writes at all.
+# Least-privilege baseline; this workflow needs no repo writes at all.
 permissions:
     contents: read
 
