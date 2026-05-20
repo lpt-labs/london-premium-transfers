@@ -13,7 +13,7 @@
 
 - **Goal:** Stand up the first real CI workflow for this repo — lint + typecheck + build on every PR, traceable artifacts, defensive triggers, least-privilege permissions, cross-job outputs — plus a workflow-scoped Claude instructions file, a Vercel preview reference workflow, and the AGENT_PLAYBOOK skeleton. After merge, every future PR (including agent-authored ones) runs through real status checks instead of just `plan-gate`.
 - **Scope (paths/files):**
-  - `docs/agent-tasks/6-agent-ci/plan.md` (this file)
+  - `docs/agent-tasks/6-agent-ci/plan.md`
   - `.github/workflows/CLAUDE.md`
   - `.github/workflows/agent-ci.yml`
   - `.github/workflows/preview-deploy.yml`
