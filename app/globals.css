@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+/**
+ * Brand @theme — mirrors lib/design-tokens.ts.
+ * If you change a value here, also update lib/design-tokens.ts.
+ * Provenance: docs/agent-tasks/4-scaffold-nextjs/extracted-tokens.md
+ */
+@theme {
+  --color-paper:     #fafaf7;
+  --color-paper-2:   #f1ede4;
+  --color-paper-3:   #ebe6d8;
+  --color-ink:       #0b0b0c;
+  --color-ink-2:     #1c1c1d;
+  --color-ink-soft:  #525053;
+  --color-ink-mute:  #8b8783;
+  --color-line:      #e6e0d3;
+  --color-line-soft: #efeae0;
+  --color-accent:    #1d3a2e;
+  --color-accent-2:  #264a3c;
+  --color-gold:      #9a7e3c;
+  --color-danger:    #b03a3a;
+  --color-ok:        #1d6b4c;
+
+  --font-sans:  var(--font-sans);
+  --font-serif: var(--font-serif);
+  --font-mono:  var(--font-mono);
+
+  --radius-s:    6px;
+  --radius-m:    10px;
+  --radius-l:    18px;
+  --radius-xl:   28px;
+  --radius-full: 999px;
+
+  --shadow-s1: 0 1px 0 rgba(11, 11, 12, 0.04), 0 1px 2px rgba(11, 11, 12, 0.04);
+  --shadow-s2: 0 8px 20px -10px rgba(11, 11, 12, 0.12), 0 2px 6px rgba(11, 11, 12, 0.04);
+  --shadow-s3: 0 30px 60px -30px rgba(11, 11, 12, 0.25), 0 8px 20px -10px rgba(11, 11, 12, 0.10);
+
+  --spacing-pad:        clamp(20px, 4vw, 56px);
+  --spacing-section:    clamp(72px, 9vw, 144px);
+  --spacing-nav-height: 76px;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
