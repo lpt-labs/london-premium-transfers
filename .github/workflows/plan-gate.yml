@@ -19,10 +19,7 @@ jobs:
     name: Plan present and filled
     # Defensive trigger guard — even though `on:` is only `pull_request`,
     # this protects against accidental misfires if someone adds more triggers later.
-    # dependabot[bot] is exempt: its PR description is the package changelog, which
-    # serves the same informational purpose as a Plan section. Narrowly scoped to
-    # dependabot[bot] only — not '*[bot]' — to avoid silently skipping unknown bots.
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Validate PR body
