@@ -48,5 +48,6 @@ next-env.d.ts
 # Test coverage reports
 coverage/
 
-# Agent scratchpads that should never leave the local machine
+# Agent scratchpads / local-only state that never leaves the machine
 .agent-scratch/
+.claude/worktrees/

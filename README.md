@@ -45,6 +45,10 @@ pnpm dev          # → http://localhost:3000
 
 The placeholder home page should render with a warm-white background, near-black headline, and an italic Instrument-Serif word in the heading — that's the brand wiring proving itself end-to-end. Tokens live in [`lib/design-tokens.ts`](lib/design-tokens.ts); Tailwind utilities are wired in [`app/globals.css`](app/globals.css).
 
+### Pre-commit hook
+
+The first `pnpm install` activates a Git pre-commit hook (via [Husky](https://typicode.github.io/husky/)) that runs ESLint with auto-fix against any staged `*.{ts,tsx,js,jsx,mjs,cjs}` files. Auto-fixable issues are silently fixed and re-staged; anything ESLint still reports — errors or warnings, because the hook runs with `--max-warnings 0` — blocks the commit. The escape hatch for a genuine emergency is `git commit --no-verify`. Typecheck and build stay in CI only (`agent-ci.yml`); they're too slow to run per commit, and CI catches what the hook can't.
+
 ### Other useful commands
 
 ```bash
