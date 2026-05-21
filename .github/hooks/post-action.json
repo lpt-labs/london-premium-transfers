@@ -1,0 +1,6 @@
+{
+  "_comment": "Copilot Cloud coding-agent hook config. CURRENTLY DORMANT — no Copilot license is attached to this repo, so this file is not executed. The active equivalent for Claude Code is .claude/settings.json (hooks.PostToolUse), which writes the same one-line audit format to .agent-scratch/audit.log. .agent-scratch/ is gitignored (see .gitignore L52), so the log never lands in a commit.",
+  "name": "post-action",
+  "trigger": "post-action",
+  "run": "mkdir -p .agent-scratch && printf '%s %s %s %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"${COPILOT_TOOL_NAME:-unknown}\" \"${COPILOT_TOOL_EXIT_CODE:-0}\" \"${COPILOT_TOOL_SUMMARY:-}\" >> .agent-scratch/audit.log; exit 0"
+}

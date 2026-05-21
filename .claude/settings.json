@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd=$(jq -r '.tool_input.command // empty' 2>/dev/null); pattern=$(printf '%s' \"$cmd\" | grep -E -o 'rm[[:space:]]+-rf[[:space:]]+/|git[[:space:]]+push[[:space:]]+(--force|-f)([[:space:]]+(origin[[:space:]]+)?main([[:space:]]|$))|gh[[:space:]]+repo[[:space:]]+delete([[:space:]]|$)|gh[[:space:]]+secret[[:space:]]+delete([[:space:]]|$)' 2>/dev/null | head -n1); if [ -n \"$pattern\" ]; then echo \"BLOCKED by .claude/settings.json PreToolUse hook: matched dangerous pattern '$pattern'. If this command is genuinely needed, run it outside the agent or edit the regex in .claude/settings.json (and mirror the change in .github/hooks/pre-tool-use.json).\" >&2; exit 2; fi; exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat); tool=$(printf '%s' \"$input\" | jq -r '.tool_name // \"unknown\"' 2>/dev/null); err=$(printf '%s' \"$input\" | jq -r '.tool_response.stderr // \"\"' 2>/dev/null); status=0; if [ -n \"$err\" ]; then status=1; fi; summary=$(printf '%s' \"$input\" | jq -r '(.tool_input.command // .tool_input.file_path // \"\") | tostring' 2>/dev/null | head -c 120 | tr '\\n' ' '); mkdir -p .agent-scratch && printf '%s %s %s %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$tool\" \"$status\" \"$summary\" >> .agent-scratch/audit.log 2>/dev/null; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
