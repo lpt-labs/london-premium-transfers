@@ -12,6 +12,7 @@
 - **Goal:** Add the agent-hook layer the rest of the safety story depends on. Three Copilot-side hook JSON files (dormant; valid configs that anyone with a Copilot license can activate) and a Claude-side `.claude/settings.json` `hooks` block (active; loads automatically into every Claude Code session in this repo). Pair with a `docs/COPILOT_STUDY/agent-firewall.md` study guide documenting the Copilot Cloud agent firewall UI we can't exercise hands-on. After merge, any Claude session that tries a forbidden command (rm -rf, force push, gh repo delete, etc.) is blocked at the hook layer before it runs.
 - **Scope (paths/files):**
   - `docs/agent-tasks/7b-hooks-firewall/plan.md` (this file)
+  - `docs/WORKFLOWS.md` (small fix from previous PR)
   - `.github/hooks/pre-tool-use.json` (Copilot — block dangerous commands)
   - `.github/hooks/post-action.json` (Copilot — append to audit log)
   - `.github/hooks/error.json` (Copilot — capture failures, label `needs-human`)
