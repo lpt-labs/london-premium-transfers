@@ -11,6 +11,7 @@ Operational runbook for agents (Claude Code, Copilot, future custom agents) when
 - [Rollback](#rollback) — undoing a merged change
 - [Failure analysis](#failure-analysis) — what to write in the postmortem
 - [GitHub token semantics](#github-token-semantics) — why workflows sometimes don't trigger other workflows
+- [Hooks dependencies](#hooks-dependencies) — what the Claude hooks need installed locally, and how to read the audit log
 
 ---
 
@@ -192,3 +193,63 @@ Working around this by running `gh pr create` (which uses the user's local crede
 
 - GitHub docs: <https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow>
 - App-token minting action: `actions/create-github-app-token` (first-party).
+
+---
+
+## Hooks dependencies
+
+The Claude-side hooks in [`.claude/settings.json`](../.claude/settings.json) shell out to **`jq`** to parse Claude Code's JSON hook input. `jq` is not part of macOS or most Linux base installs — you have to install it yourself.
+
+```bash
+# macOS
+brew install jq
+
+# Debian / Ubuntu
+sudo apt install jq
+
+# Alpine / Docker base images
+apk add jq
+```
+
+### What happens if `jq` is missing
+
+The two hooks behave differently on purpose:
+
+- **PreToolUse hook (fails closed).** Without `jq`, the hook can't inspect the command, so it can't detect dangerous patterns (`rm -rf /`, `git push --force main`, `gh repo delete`, `gh secret delete`). Allowing the command anyway would defeat the entire point of the hook. So instead, the hook exits 2 with a clear error: `BLOCKED ... jq is required for this hook but is not installed. Install via 'brew install jq' on macOS or 'apt install jq' on Debian.` Every Bash tool call is blocked until you install `jq`. This is intentional — a silent fail-open on a security control is the worst possible outcome.
+
+- **PostToolUse hook (fails open).** The audit log is informational, not a security control. If `jq` is missing, the hook silently exits 0 without writing a log line. Tool calls proceed normally. You lose audit coverage but nothing breaks. Once you install `jq`, audit logging resumes.
+
+Same reasoning, different posture: the security control fails loud and blocks; the informational tool fails quiet and skips.
+
+### Audit-log semantics
+
+The PostToolUse hook appends one line per tool call to `.agent-scratch/audit.log` (which is in `.gitignore`, so the log never lands in a commit). Format:
+
+```
+<ISO-8601 UTC timestamp> <tool-name> <status> <command-or-path-summary>
+```
+
+The `<status>` column comes from `.tool_response.exit_code` in Claude Code's hook input:
+
+- For **Bash** tool calls, `<status>` is the underlying shell command's exit code — `0` on success, non-zero on failure with the actual exit code value (`1`, `2`, `127`, etc.).
+- For **Write** and **Edit** tool calls, Claude Code doesn't expose an exit code (the tool either succeeds or throws, with no numeric code). The hook defaults to `0` when the field is absent. Treat a Write/Edit log entry with `<status> 0` as "tool ran without error"; if the tool threw, the hook generally doesn't run at all.
+
+**Historical note (relevant if you're reading an old audit log):** before commit `<merge-sha of this PR>`, the hook treated *any non-empty stderr* as failure (`status=1`), and *empty stderr* as success (`status=0`). This was noisy — many successful tools write informational messages to stderr (`git status` prints branch info, `pnpm install` prints progress). Old log entries showing `1` may have been successful runs that just wrote to stderr. The new semantics (exit code) are accurate; old entries are not retroactively cleaned up because the log is append-only and ephemeral.
+
+### Rotating or clearing the log
+
+`.agent-scratch/audit.log` grows append-only. For typical solo development the log stays well under 1 MB per week, but if you want to rotate it:
+
+```bash
+# inspect first
+wc -l .agent-scratch/audit.log
+
+# keep the last 10000 lines, drop the rest
+tail -n 10000 .agent-scratch/audit.log > .agent-scratch/audit.log.tmp \
+  && mv .agent-scratch/audit.log.tmp .agent-scratch/audit.log
+
+# or just clear it
+: > .agent-scratch/audit.log
+```
+
+The directory is per-machine — there's no shared log, no remote sync, no retention policy. It's a developer-local diagnostic tool, not an audit-grade compliance artifact. For the compliance side of things, GitHub's own audit log (org Settings → Audit log) covers the events that matter for the certification surface.
