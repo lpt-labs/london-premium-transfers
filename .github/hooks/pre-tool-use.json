@@ -1,0 +1,6 @@
+{
+  "_comment": "Copilot Cloud coding-agent hook config. CURRENTLY DORMANT — no Copilot license is attached to this repo, so this file is not executed. The active equivalent for Claude Code is .claude/settings.json (hooks.PreToolUse). Keep the dangerous-pattern regex in sync between the two files when either is edited.",
+  "name": "pre-tool-use",
+  "trigger": "pre-tool-use",
+  "run": "set +e; cmd=\"${COPILOT_TOOL_INPUT:-}\"; if printf '%s' \"$cmd\" | grep -E -q 'rm[[:space:]]+-rf[[:space:]]+/|git[[:space:]]+push[[:space:]]+(--force|-f)([[:space:]]+(origin[[:space:]]+)?main([[:space:]]|$))|gh[[:space:]]+repo[[:space:]]+delete([[:space:]]|$)|gh[[:space:]]+secret[[:space:]]+delete([[:space:]]|$)'; then echo 'BLOCKED by pre-tool-use hook: dangerous command pattern matched. See .github/hooks/pre-tool-use.json.' >&2; exit 1; fi; exit 0"
+}

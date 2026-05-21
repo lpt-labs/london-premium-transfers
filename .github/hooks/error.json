@@ -1,0 +1,6 @@
+{
+  "_comment": "Copilot Cloud coding-agent hook config. CURRENTLY DORMANT — no Copilot license is attached to this repo, so this file is not executed. Claude Code does not expose a dedicated 'error' hook event; the error path on the Claude side is folded into hooks.PostToolUse, which conditionally logs failures based on the tool's exit code. See .claude/settings.json and docs/AGENT_PLAYBOOK.md (Escalation) for the equivalent flow.",
+  "name": "on-error",
+  "trigger": "on-error",
+  "run": "set +e; pr=\"${COPILOT_PR_NUMBER:-}\"; if [ -n \"$pr\" ]; then gh pr edit \"$pr\" --add-label needs-human >/dev/null 2>&1 || true; fi; mkdir -p .agent-scratch && printf '%s ERROR pr=%s reason=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$pr\" \"${COPILOT_ERROR_REASON:-unspecified}\" >> .agent-scratch/audit.log; exit 0"
+}
