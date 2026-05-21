@@ -70,7 +70,7 @@ flowchart LR
 
 ## A typical PR's lifecycle
 
-The sequence below describes the happy-path flow when a developer (or `@claude`) opens a PR against `main`.
+The sequence below describes the happy-path flow when a developer (or `@claude`/`@copilot`) opens a PR against `main`.
 
 ```mermaid
 sequenceDiagram
