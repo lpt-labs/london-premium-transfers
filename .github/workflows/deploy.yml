@@ -1,0 +1,60 @@
+name: Deploy (reference)
+
+# REFERENCE WORKFLOW — does not actually deploy.
+
+# Vercel's GitHub integration handles real preview + production deploys for
+# this repo. This file exists to document the pattern for wiring a workflow
+# to the `production` environment's required-reviewer gate, so future
+# workflows that genuinely need an approval gate (migrations, secret
+# rotation, inventory syncs) have a known-good shape to copy.
+
+# DO NOT add a `pull_request` trigger here without re-evaluating whether the
+# environment gate still makes sense. The gate only protects the runtime
+# step — adding `pull_request` would cause the workflow to fire on every PR
+# and queue an approval request per PR, which is not what we want.
+
+on:
+    workflow_dispatch:
+        inputs:
+            note:
+                description: "Optional note shown on the run page (e.g. a release tag)."
+                required: false
+                type: string
+                default: ""
+
+# Least-privilege baseline. A real deploy would elevate per-job to whatever
+# its real steps require (id-token, contents, etc.).
+permissions:
+    contents: read
+
+jobs:
+    deploy:
+      name: Deploy to production
+      runs-on: ubuntu-latest
+
+      # The gate. `production` is configured in repo Settings → Environments
+      # with required reviewers. When this job starts, GitHub pauses it in
+      # "Waiting" state until a required reviewer clicks "Review deployments
+      # → Approve". After approval, the steps below execute.
+      #
+      # The protection rules (reviewers, wait timer, branch restrictions) live
+      # on the environment, NOT in this file. That's intentional — admins can
+      # tighten or relax the gate without editing every workflow that uses it.
+      environment:
+        name: production
+    
+      steps:
+        - name: Announce
+          env:
+            NOTE: ${{ github.event.inputs.note }}
+          run: |
+            echo "::notice title=Deploy (reference)::Approval received. This workflow is a reference; no real deploy is performed here — Vercel's GitHub integration handles deploys."
+            if [ -n "${NOTE:-}" ]; then
+              echo "Note: $NOTE"
+            fi
+        - name: Placeholder for real deploy steps
+          run: |
+            echo "Real deploys are handled by Vercel's GitHub integration."
+            echo "When a workflow genuinely needs to run code behind the production gate,"
+            echo "copy this file's 'environment: { name: production }' block and replace"
+            echo "these placeholder steps with the real work."
