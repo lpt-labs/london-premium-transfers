@@ -1,0 +1,97 @@
+name: "retry-step"
+description: >
+  Run a shell command with bounded retries. Defaults to 3 attempts with a 5s
+  delay between them. On exhaustion, writes each attempt's output to the
+  job's step summary and fails the step.
+
+inputs:
+  command:
+    description: "Shell command to run. Executed with `bash -c`."
+    required: true
+  max-attempts:
+    description: "Maximum number of attempts before giving up."
+    required: false
+    default: "3"
+  delay-seconds:
+    description: "Seconds to wait between failed attempts."
+    required: false
+    default: "5"
+  
+runs:
+  using: "composite"
+  steps:
+    - name: Run with retries
+      shell: bash
+      # Inputs passed via env (not direct ${{ }} interpolation) so the command
+      # string isn't expanded into the YAML-rendered script. The caller is still
+      # responsible for the shell-safety of whatever they pass — this action
+      # runs arbitrary code by design.
+      env:
+        COMMAND: ${{ inputs.command }}
+        MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+        DELAY_SECONDS: ${{ inputs.delay-seconds }}
+      run: |
+        # No `set -e`: a failing attempt must NOT exit the script — we need
+        # to capture the exit code and decide whether to retry.
+        set -uo pipefail
+
+        # Validate the numeric inputs — composite-action inputs are strings, so
+        # a typo like max-attempts: "three" would otherwise blow up mid-loop.
+        if ! [[ "$MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+          echo "::error title=retry-step::max-attempts must be a positive integer, got: $MAX_ATTEMPTS"
+          exit 1
+        fi
+        if ! [[ "$DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+          echo "::error title=retry-step::delay-seconds must be a non-negative integer, got: $DELAY_SECONDS"
+          exit 1
+        fi
+
+        max="$MAX_ATTEMPTS"
+        delay="$DELAY_SECONDS"
+        logdir="${RUNNER_TEMP:-/tmp}/retry-step-$$"
+        mkdir -p "$logdir"
+
+        attempt=0
+        while [ $attempt -lt $max ]; do
+          attempt=$((attempt + 1))
+          echo "::group::retry-step attempt $attempt/$max"
+          bash -c "$COMMAND" 2>&1 | tee "$logdir/attempt-$attempt.log"
+          rc=${PIPESTATUS[0]}
+          echo "::endgroup::"
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::notice title=retry-step::Succeeded on attempt $attempt/$max."
+            rm -rf "$logdir"
+            exit 0
+          fi
+
+          if [ "$attempt" -lt "$max" ]; then
+            echo "Attempt $attempt failed (exit $rc). Sleeping ${delay}s before retry."
+            sleep "$delay"
+          fi
+        done
+
+        # All attempts failed — write a structured summary with each attempt's
+        # output so reviewers don't have to scroll through three log groups.
+        {
+          echo "### retry-step exhausted after $max attempts"
+          echo ""
+          echo "Command:"
+          echo ""
+          echo '```'
+          echo "$COMMAND"
+          echo '```'
+          echo ""
+          for i in $(seq 1 "$max"); do
+            echo "#### Attempt $i"
+            echo ""
+            echo '```'
+            tail -n 100 "$logdir/attempt-$i.log" 2>/dev/null || echo "(no output captured)"
+            echo '```'
+            echo ""
+          done
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "::error title=retry-step exhausted::Command failed after $max attempts. See the job's Summary tab for per-attempt output."
+        rm -rf "$logdir"
+        exit 1

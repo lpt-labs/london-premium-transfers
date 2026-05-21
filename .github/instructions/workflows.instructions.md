@@ -40,9 +40,14 @@ These paths are L3 in the autonomy table. A PR touching them without the label w
 - Use `continue-on-error: false` (the default) for any step whose failure should block downstream work. Don't silently swallow failures.
 - For transient external calls (network, rate-limited APIs), wrap in a bounded retry — three attempts maximum, with a short delay. After three failures the workflow fails and surfaces a clear message.
 
+## Documentation
+
+- **Update `docs/WORKFLOWS.md` in the same PR** that adds, removes, or modifies a workflow file (or its triggers, permissions, or outcomes). The doc holds the flowchart, sequence diagram, and per-workflow table that are this repo's visual source of truth for CI shape. Same-PR-or-it-rots; reviewers should flag workflow PRs that don't touch this doc.
+
 ## Anti-patterns
 
 - Editing a workflow to make a failing check pass instead of fixing the underlying problem.
 - Granting `write` permission "just in case."
 - Using `${{ github.event.pull_request.title }}` or any other PR-author-controlled input in a shell command without sanitization — a vector for command injection.
 - Triggering on `pull_request_target` for any workflow that checks out and runs untrusted PR code.
+- Modifying a workflow without also updating `docs/WORKFLOWS.md`. The doc rots fast and becomes misleading rather than helpful.

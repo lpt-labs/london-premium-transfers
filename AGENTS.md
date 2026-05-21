@@ -94,6 +94,10 @@ These are blocked by hooks, workflows, or CODEOWNERS. The agent should treat the
 - Agent branches are named `agent/<short-topic>` or `chore/<short-topic>`.
 - No force-push to `main`. (Branch protection enforces this for everyone except the bypass list.)
 
+### Documentation invariants
+- **`docs/WORKFLOWS.md` is the visual source of truth for every workflow in `.github/workflows/`.** Any PR that adds, removes, or modifies a workflow file (or changes its triggers, permissions, or outcomes) MUST update `docs/WORKFLOWS.md` in the same PR — including the relevant diagram and the per-workflow table row. Same-PR-or-it-rots. Reviewers should flag workflow-touching PRs that don't update this doc.
+- Adding or removing a required status check in the `protect-main` ruleset also requires updating the "Required status checks" section of `docs/WORKFLOWS.md`.
+
 ---
 
 ## Failure handling (overview)

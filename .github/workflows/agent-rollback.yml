@@ -1,0 +1,161 @@
+name: Agent Rollback
+
+# Manually-triggered rollback workflow. Given a commit SHA on `main`, opens a
+# revert PR with a valid Plan section so it passes plan-gate on the way back in.
+#
+# Usage:
+#   gh workflow run agent-rollback.yml -f sha=<40-char-sha> -f reason="<why>"
+#
+# Hard rule (see .github/instructions/workflows.instructions.md): the SHA input
+# is user-supplied via workflow_dispatch and MUST be validated against a hex
+# regex before any shell command touches it, and MUST only be passed into
+# `run:` via `env:` — never via direct ${{ }} interpolation.
+
+on:
+    workflow_dispatch:
+        inputs:
+            sha:
+                description: "Full 40-char commit SHA on main to revert."
+                required: true
+                type: string
+            reason:
+                description: "Why we are rolling back (one sentence; appears in the revert PR body)."
+                required: true
+                type: string
+                default: "Production breakage - see escalation comment on the original PR."
+
+# Least-privilege baseline: the revert job elevates per-job below.
+permissions:
+    contents: read
+
+jobs:
+    revert:
+        name: Open revert PR
+        runs-on: ubuntu-latest
+        # Elevated only on this job: push a revert branch + open a PR.
+        permissions:
+            contents: write
+            pull-requests: write
+        steps:
+            # ------------------------------------------------------------------
+            # Step 1: validate the SHA before anything else runs.
+            # ------------------------------------------------------------------
+            - name: Validate SHA input
+              env:
+                INPUT_SHA: ${{ github.event.inputs.sha }}
+              run: |
+                set -euo pipefail
+                if [[ ! "$INPUT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+                  echo "::error title=Invalid SHA::sha input must be a 40-character lowercase hex string."
+                  exit 1
+                fi
+                echo "::notice title=SHA validated::Input matches ^[0-9a-f]{40}$"
+            
+            - name: Checkout main (full history)
+              uses: actions/checkout@v4
+              with:
+                ref: main
+                fetch-depth: 0
+            
+            - name: Configure git identity
+              run: |
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            
+            # ------------------------------------------------------------------
+            # Step 2: verify the SHA is actually on main. Prevents reverting
+            # something that was never merged.
+            # ------------------------------------------------------------------
+            - name: Verify SHA is on main
+              env:
+                INPUT_SHA: ${{ github.event.inputs.sha }}
+              run: |
+                set -euo pipefail
+                if ! git merge-base --is-ancestor "$INPUT_SHA" HEAD; then
+                  echo "::error title=SHA not on main::The provided SHA is not an ancestor of main."
+                  exit 1
+                fi
+            
+            # ------------------------------------------------------------------
+            # Step 3: branch + revert. Plain `git revert` first; if it fails
+            # (target is a merge commit), retry with --mainline 1.
+            # ------------------------------------------------------------------
+            - name: Create revert branch and revert commit
+              env:
+                INPUT_SHA: ${{ github.event.inputs.sha }}
+              run: |
+                set -euo pipefail
+                short="${INPUT_SHA:0:7}"
+                branch="revert/${short}"
+                git checkout -b "$branch"
+                if ! git revert --no-edit "$INPUT_SHA"; then
+                  git revert --abort || true
+                  git revert --no-edit --mainline 1 "$INPUT_SHA"
+                fi
+                git push origin "$branch"
+                {
+                    echo "BRANCH=$branch"
+                    echo "SHORT=$short"
+                } >> "$GITHUB_ENV"
+            
+            # ------------------------------------------------------------------
+            # Step 4: open the revert PR. Body contains a valid plan section so
+            # the revert PR itself passes plan-gate.
+            # ------------------------------------------------------------------
+            - name: Open revert PR
+              env:
+                GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                INPUT_SHA: ${{ github.event.inputs.sha }}
+                REASON: ${{ github.event.inputs.reason }}
+                ACTOR: ${{ github.actor }}
+                RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+              run: |
+                set -euo pipefail
+                title="revert: ${SHORT} - automated rollback"
+                body=$(cat <<EOF
+                Automated rollback opened by \`agent-rollback.yml\`.
+                
+                ## Plan (required)
+                
+                <!-- PLAN:BEGIN -->
+
+                - **Goal:** Revert commit \`${INPUT_SHA}\` from \`main\`.
+                - **Scope (paths/files):** Files touched by the original commit (see diff).
+                - **Steps:**
+                  1. \`git revert ${INPUT_SHA}\` on branch \`${BRANCH}\`.
+                  2. Open this PR.
+                  3. Merge after review.
+                - **Success criteria (verifiable):**
+                  - [ ] CI passes on the revert branch.
+                  - [ ] The reverted change no longer appears in \`main\` after merge.
+                - **Risks + mitigations:**
+                  - *Risk:* the revert conflicts with newer commits on \`main\`. *Mitigation:* resolve manually on the branch.
+                - **Rollback / escalation plan:**
+                  - Rollback: close this PR without merging if the issue resolves on its own.
+                  - Escalation: add label \`needs-human\` and tag @mafaq229.
+
+                <!-- PLAN:END -->
+
+                ## Reason
+
+                ${REASON}
+
+                ## Original commit
+
+                - SHA: \`${INPUT_SHA}\`
+                - Triggered by: @${ACTOR}
+                - Workflow run: ${RUN_URL}
+
+                > **Note:** PRs opened by \`GITHUB_TOKEN\` do not auto-trigger downstream
+                > workflows (see \`docs/AGENT_PLAYBOOK.md\` → GitHub token semantics).
+                > Push an empty commit on this branch, or use "Re-run all jobs" on the
+                > PR's checks tab, to start CI.
+                EOF
+                )
+                gh pr create \
+                --base main \
+                --head "$BRANCH" \
+                --title "$title" \
+                --body "$body" \
+                --label "infra-change" \
+                --label "needs-human"

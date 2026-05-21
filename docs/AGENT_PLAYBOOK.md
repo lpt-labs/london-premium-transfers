@@ -16,28 +16,134 @@ Operational runbook for agents (Claude Code, Copilot, future custom agents) when
 
 ## Escalation
 
-*To be filled in PR 7.* Will cover:
+The repo runs a **two-strike safe-iteration policy**: an agent gets exactly two chances on the same failure before it must stop and escalate. This caps wasted CI cycles, prevents loops that look like progress, and forces a human into the conversation before a stuck PR rots.
 
-- The `needs-human` label as the canonical escalation signal.
-- What information to include when an agent posts the escalation comment (what failed, what was attempted, evidence links, suggested next step).
-- Who reviews escalations (@mafaq229 for now).
-- SLA expectations.
+### How the two strikes are scored
+
+- **Strike 1** — a required check fails (lint, typecheck, build, plan-gate, eval, drift, path-guard). The agent may inspect logs, push a single revised commit, and let CI re-run.
+- **Strike 2** — the *same* check fails again. Stop. Do not push another fix. Post the escalation comment (template below) and add the `needs-human` label.
+
+"Same check" means same workflow + same job + same step. A new lint failure on a different rule, after the original lint failure was fixed, is a fresh strike 1 — not strike 2 of the original. Use judgment; when in doubt, escalate.
+
+Failures that do **not** qualify for a retry at all: anything with a clear, deterministic cause already visible in the first log (typecheck, lint, unit-test assertion). These are bugs, not transients — fix in the original commit. The retry exists for genuinely ambiguous failures, not as a free do-over.
+
+### Escalation comment template
+
+When strike 2 fires, post this as a PR comment, fill all four fields, then apply the `needs-human` label. Copy verbatim:
+
+```markdown
+<!-- agent-escalation -->
+### Escalation: needs-human
+
+1. **What failed.**
+   <Which check, which step, which assertion. One sentence. Link the failing run.>
+
+2. **What was attempted.**
+   <The commit(s) made between strike 1 and strike 2. Why you thought they would fix it.>
+
+3. **Evidence links.**
+   <Failing run URL, the diff of the attempted fix, artifact name(s), relevant log excerpts.>
+
+4. **Suggested next step.**
+   <Your best guess at the underlying cause and one concrete action a human should take — e.g., "revert the dep bump in commit abc1234", "rerun after the upstream API recovers", "add @owner to review the regex".>
+```
+
+All four fields are required, and the order is not interchangeable. The structure is the contract: a reviewer reading any escalation comment knows exactly what they're getting and in what order. The `<!-- agent-escalation -->` marker lets future automation find escalation comments without fragile text matching.
+
+### Who sees it, and when
+
+- `needs-human` is the canonical escalation label.
+- Today, @mafaq229 is the human-of-record for all escalations.
+- SLA: best-effort same-day; no overnight expectation.
+- When the human resolves the escalation, they remove the `needs-human` label (or close/convert the PR, as appropriate).
 
 ## Retries
 
-*To be filled in PR 7.* Will cover:
+Two valid retry shapes exist in this repo. Both cap at **three attempts**, per `.github/instructions/workflows.instructions.md`.
 
-- The "one retry then stop" rule from `AGENTS.md` (first failure → revise + rerun once; second failure of the same check → stop).
-- Which kinds of failures are safe to retry without code change (transient network, rate limits, infrastructure timeouts).
-- Which are not (test failure, type error, lint violation).
+### When to retry vs. not retry
+
+| Failure looks like | Retry? |
+| --- | --- |
+| Network timeout on an external API call | Yes |
+| Package registry returned 503 / ETIMEDOUT / connection reset | Yes |
+| Rate limit (HTTP 429) with a reset header | Yes, after sleeping past the reset |
+| Type error, lint violation, failed assertion | No — fix it |
+| Build error from a missing or wrong dependency | No — fix it |
+| `permission denied` on a workflow scope | No — escalate |
+
+Retries exist to absorb genuine environmental flakiness. If you can read the failure and point at a real bug, retrying is hiding the bug behind two more red runs.
+
+### Pattern A — inline bash retry
+
+For one-off retries inside a `run:` block where pulling in the composite action would be overkill:
+
+```bash
+attempts=0
+max=3
+until pnpm install --frozen-lockfile; do
+  attempts=$((attempts + 1))
+  if [ "$attempts" -ge "$max" ]; then
+    echo "::error::pnpm install failed after $max attempts"
+    exit 1
+  fi
+  echo "Attempt $attempts failed, sleeping 10s…"
+  sleep 10
+done
+```
+
+### Pattern B — `retry-step` composite action
+
+For anything more structured — collapsible per-attempt log groups, a markdown summary of every attempt's output on exhaustion — use the composite action at `.github/actions/retry-step`:
+
+```yaml
+- name: Install with retries
+  uses: ./.github/actions/retry-step
+  with:
+    command: pnpm install --frozen-lockfile
+    max-attempts: "3"
+    delay-seconds: "10"
+```
+
+Inputs (all values are strings, even the numeric ones):
+
+- `command` (required): the shell command to retry. Executed via `bash -c`.
+- `max-attempts` (default `"3"`): positive integer.
+- `delay-seconds` (default `"5"`): non-negative integer.
+
+On exhaustion the action appends each attempt's last 100 log lines to `$GITHUB_STEP_SUMMARY`. Every retry's output is preserved, not just the last one — this matters when a flake produces a different error on each attempt.
 
 ## Rollback
 
-*To be filled in PR 7.* Will cover:
+For a merged PR that breaks production, the canonical command is:
 
-- `gh workflow run agent-rollback.yml -f sha=<merge-sha>` — the canonical rollback path once the workflow exists (added in a later PR).
-- When to use `git revert` on a follow-up PR instead of the rollback workflow.
-- How to communicate rollback in the original PR's thread.
+```bash
+gh workflow run agent-rollback.yml \
+  -f sha=<merge-commit-sha> \
+  -f reason="<one-sentence cause>"
+```
+
+`<merge-commit-sha>` is the **full 40-character lowercase hex SHA** of the merge commit on `main` — not a short SHA, not the PR's head commit. To get it:
+
+```bash
+gh pr view <pr-number> --json mergeCommit --jq .mergeCommit.oid
+```
+
+### What happens after you run the command
+
+1. The workflow validates the SHA against `^[0-9a-f]{40}$`. Bad input → exits 1 with an annotation; nothing else runs.
+2. It checks out `main` with full history, verifies the SHA is reachable from `HEAD`, creates a branch `revert/<short-sha>`, and runs `git revert` (with `--mainline 1` fallback for merge commits).
+3. It opens a PR against `main` with an auto-generated `## Plan (required)` block (so the revert PR itself passes `plan-gate`), labeled `infra-change` + `needs-human`.
+4. **CI does not auto-trigger on the new PR.** PRs created via `GITHUB_TOKEN` don't fire downstream workflow events — see [GitHub token semantics](#github-token-semantics). To start CI on the revert branch: push an empty commit, or click *Re-run all jobs* on the revert PR's checks tab.
+5. Review and merge the revert PR like any other PR. CODEOWNERS still applies; `agent-ci` must pass once you've triggered it.
+
+### When to use `git revert` manually instead
+
+The rollback workflow is for production incidents — you want the paper trail (workflow run, auto-generated PR body, labels). For low-stakes reverts (a docs typo merged by mistake, a misnamed file), a normal `git revert` on a hand-opened PR is fine. Threshold: if you'd want to point at "the rollback" in a postmortem, use the workflow.
+
+### Communicate the rollback in the original thread
+
+Post a comment on the *original* (broken) PR linking to the revert PR. Future readers landing on the original PR shouldn't have to grep the timeline to discover it was rolled back.
 
 ## Failure analysis
 
