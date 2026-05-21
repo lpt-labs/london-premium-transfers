@@ -47,6 +47,11 @@ short version, for reference while editing:
   See `plan-gate.yml` for the pattern.
 - **Never `pull_request_target` for untrusted code.** That trigger runs with
   repo write tokens against forked code — a known supply-chain footgun.
+- **Update `docs/WORKFLOWS.md` in the same PR.** Any add/remove/modify to a
+  workflow file (or its triggers, permissions, or outcomes) requires updating
+  the relevant diagram, sequence, and per-workflow table row in
+  `../../docs/WORKFLOWS.md`. Same-PR-or-it-rots — reviewers should flag
+  workflow PRs that don't touch this doc.
 
 ## When unsure
 
