@@ -172,7 +172,7 @@ jobs:
             pull-requests: write
         steps:
             - name: Find-or-update PR comment
-              uses: actions/github-script@v7
+              uses: actions/github-script@v9
               env:
                   # Pass workflow values via env, never interpolate event-controlled
                   # strings directly into the JS body. (PR title/body would be
