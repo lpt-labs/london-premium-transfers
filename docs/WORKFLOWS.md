@@ -18,6 +18,7 @@ flowchart LR
     %% Workflows
     PLAN_GATE[plan-gate.yml]
     ARTIFACT_CHECK[agent-artifact-check.yml]
+    DRIFT[drift-check.yml]
     AGENT_CI[agent-ci.yml]
     CLAUDE[claude.yml]
     CLAUDE_REVIEW[claude-code-review.yml]
@@ -30,6 +31,7 @@ flowchart LR
     REQUIRED_CHECK{{Required status check}}
     INFO_CHECK[Informational status check]
     PR_COMMENT[/PR comment/]
+    LABEL_DRIFT[/agent-drift label/]
     ARTIFACT[/Workflow artifact<br/>logs-RUN-SHA/]
     BOT_PR[/Bot creates branch + PR/]
     VERCEL_PREVIEW[/Vercel preview URL/]
@@ -44,6 +46,13 @@ flowchart LR
     PR_OPEN --> ARTIFACT_CHECK --> INFO_CHECK
     PR_BODY_EDIT --> ARTIFACT_CHECK
     DEPENDABOT -.exempt.-> ARTIFACT_CHECK
+
+    PR_OPEN --> DRIFT
+    PR_BODY_EDIT --> DRIFT
+    DEPENDABOT -.exempt.-> DRIFT
+    DRIFT --> INFO_CHECK
+    DRIFT --> PR_COMMENT
+    DRIFT --> LABEL_DRIFT
 
     PR_OPEN --> AGENT_CI
     AGENT_CI --> INFO_CHECK
@@ -68,8 +77,8 @@ flowchart LR
     classDef gate fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
 
     class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT trigger
-    class PLAN_GATE,ARTIFACT_CHECK,AGENT_CI,CLAUDE,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
-    class PR_COMMENT,ARTIFACT,BOT_PR,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
+    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,AGENT_CI,CLAUDE,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
+    class PR_COMMENT,LABEL_DRIFT,ARTIFACT,BOT_PR,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
     class REQUIRED_CHECK gate
 ```
 
@@ -83,6 +92,7 @@ sequenceDiagram
     participant GH as GitHub
     participant Gate as plan-gate.yml
     participant Artifact as agent-artifact-check.yml
+    participant Drift as drift-check.yml
     participant CI as agent-ci.yml
     participant Review as claude-code-review.yml
     participant CodeQL as CodeQL
@@ -97,6 +107,9 @@ sequenceDiagram
     and Artifact check runs
         GH->>Artifact: trigger
         Artifact-->>GH: info check ✓ (plan.md present, OR skipped for non-agent PR)
+    and Drift check runs
+        GH->>Drift: trigger
+        Drift-->>GH: info comment (+ `agent-drift` label if changes touch paths outside Scope)
     and CI runs
         GH->>CI: trigger
         CI->>CI: lint, typecheck, build
@@ -127,6 +140,7 @@ sequenceDiagram
 | --- | --- | --- | --- | --- |
 | `plan-gate.yml` | PR `opened`, `edited`, `synchronize`, `reopened`, `ready_for_review` (excludes `dependabot[bot]` via `if:`) | `contents: read`, `pull-requests: read` | Status check validating the `## Plan (required)` section exists with non-empty Goal + at least one Step | ✅ Required (configured in `protect-main` ruleset) |
 | `agent-artifact-check.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `edited`, `labeled`, `unlabeled` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]` and for PRs that are neither on a `claude/**`/`agent/**` branch nor labeled `agent-task`. | `contents: read`, `pull-requests: read` | Informational status check verifying an agent-shaped PR adds or references a `docs/agent-tasks/<task-id>/plan.md` file (see `docs/MEMORY_POLICY.md`) | Informational on day one — promote to required only after a few green runs on real agent PRs |
+| `drift-check.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `edited` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]`. | Read-only `check` job: `contents: read`, `pull-requests: read`. Write-elevated `report` job: `contents: read`, `pull-requests: write`, `issues: write` (the labels API lives under issues). | Find-or-update PR comment listing files touched outside the plan's `- **Scope (paths/files):**` block; toggles the `agent-drift` label. Always exits 0. | Informational on day one — never fails the run; promote to required only after a few real PRs show the signal is reliable |
 | `agent-ci.yml` | PR `opened` / `synchronize` on `agent/**` and `feat/**` branches | `contents: read`, `pull-requests: write` | Lint, typecheck, build status checks; PR comment summary; uploaded artifact named `logs-<run-id>-<sha>` | Informational (could be made required via ruleset) |
 | `claude.yml` | Agent mention (currently the trigger string is `@claude`) in issue body/title, issue comment, PR comment, or PR review | `contents: read`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read` | Agent runs the requested task in a runner; commits to a branch; opens/updates a PR; posts a status comment on the originating issue/PR | n/a (not a status check) |
 | `claude-code-review.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review` | `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write` | Posts review comments from the official `code-review` plugin | Informational (review comments) |
@@ -149,6 +163,8 @@ sequenceDiagram
 The exemption is narrow on purpose: `dependabot[bot]` only, not `*[bot]`. Any other bot we add must either fit the Plan format or get its own explicit exemption.
 
 `agent-artifact-check.yml` mirrors the same Dependabot exemption (and adds a second skip for human PRs that aren't agent-shaped) — same reasoning: Dependabot's PRs don't need a `docs/agent-tasks/<task-id>/plan.md` because they're not agent-authored tasks. See `docs/MEMORY_POLICY.md` for the artifact requirement itself.
+
+`drift-check.yml` also exempts `dependabot[bot]` — its PRs ship a structured changelog, not a plan with a `Scope (paths/files)` block, so there's nothing to drift-check against. The workflow is **soft-rolled-out**: it posts an informational comment and (if drift is detected) applies the `agent-drift` label, but never fails the run. Promote to a required status check only after a few real agent PRs show the signal is reliable.
 
 See the inline comment in `.github/workflows/plan-gate.yml` for the canonical justification.
 

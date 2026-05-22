@@ -1,0 +1,298 @@
+name: Drift Check
+
+# Detects when a PR's diff strays outside the paths declared in the plan's
+# `- **Scope (paths/files):**` block (PR template or pasted plan.md bullets).
+# Posts a find-or-update comment and toggles an `agent-drift` label.
+#
+# Informational only on day one — never fails the run, not a required check.
+# Soft-rollout pattern mirrors `agent-artifact-check.yml`.
+
+on:
+    pull_request:
+        # `edited` so re-running after a PR description fix works without a
+        # new commit. `labeled`/`unlabeled` deliberately omitted — label
+        # changes don't affect the drift decision.
+        types: [opened, synchronize, reopened, ready_for_review, edited]
+        branches: [main]
+    # Manual re-run for a specific PR (e.g., after a workflow tweak).
+    workflow_dispatch:
+        inputs:
+            pr_number:
+                description: PR number to re-check.
+                required: true
+                type: string
+
+# Least-privilege baseline. Each job re-declares what it actually needs.
+permissions:
+    contents: read
+
+# If a new commit lands on the same PR while a previous run is mid-flight,
+# cancel the older run so the comment is always written from the latest sha.
+concurrency:
+    group: drift-check-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.ref }}
+    cancel-in-progress: true
+
+env:
+    NODE_VERSION: ${{ vars.NODE_VERSION || '24' }}
+
+jobs:
+    # ------------------------------------------------------------------
+    # Job 1: compute drift (read-only — no PR writes)
+    # ------------------------------------------------------------------
+    check:
+        name: Compute drift
+        # Defensive trigger guard — protects against later additions of
+        # cron/etc. Same pattern as plan-gate.yml and agent-artifact-check.yml.
+        # dependabot[bot] is exempt: its PR description is the package
+        # changelog, not a plan with a Scope block.
+        if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && github.actor != 'dependabot[bot]'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: read
+        outputs:
+            skipped: ${{ steps.drift.outputs.skipped }}
+            extra_count: ${{ steps.drift.outputs.extra_count }}
+            extra_list: ${{ steps.drift.outputs.extra_list }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+
+            - name: Compute drift
+              id: drift
+              # All PR-author-controlled values flow through env. PR_BODY is
+              # never interpolated into the shell — command-injection safety
+              # (see .github/workflows/CLAUDE.md, pattern from plan-gate.yml).
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  PR_BODY: ${{ github.event.pull_request.body }}
+                  PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+                  PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  # ---- Resolve PR number for this run ------------------
+                  if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                      # Validate purely-numeric so unvalidated input can't
+                      # probe arbitrary gh paths.
+                      if ! [[ "${PR_NUMBER_INPUT:-}" =~ ^[0-9]+$ ]]; then
+                          echo "::error title=Bad input::pr_number input must be a positive integer (got '${PR_NUMBER_INPUT:-}')."
+                          exit 1
+                      fi
+                      PR_NUMBER="$PR_NUMBER_INPUT"
+                      # PR_BODY env is empty for workflow_dispatch — fetch.
+                      PR_BODY=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body --jq '.body // ""')
+                  else
+                      PR_NUMBER="$PR_NUMBER_EVENT"
+                  fi
+
+                  # ---- Parse Scope (paths/files) block -----------------
+                  # Same awk shape as plan-gate.yml's Steps parser: flip
+                  # `in_scope` on when we see the heading bullet, flip off
+                  # at the next top-level `- **` bullet.
+                  scope_block=$(awk '
+                      /^- \*\*Scope \(paths\/files\):\*\*/ { in_scope = 1; next }
+                      /^- \*\*/ && in_scope { in_scope = 0 }
+                      in_scope { print }
+                  ' <<<"$PR_BODY")
+
+                  # Plans wrap paths in backticks (`app/page.tsx`). Pull
+                  # those out; ignore parenthetical notes and blank lines.
+                  scope_paths=$(grep -oE '`[^`]+`' <<<"$scope_block" | tr -d '`' | grep -v '^$' || true)
+
+                  if [ -z "$scope_paths" ]; then
+                      echo "::notice title=Drift Check::No Scope (paths/files) entries parsed from PR body. Skipping drift check (plan-gate enforces Plan presence separately)."
+                      {
+                          echo "skipped=true"
+                          echo "extra_count=0"
+                          echo "extra_list<<DRIFT_EOF"
+                          echo "DRIFT_EOF"
+                      } >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  # ---- List changed files in this PR -------------------
+                  changed=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only)
+
+                  # ---- Build JSON input for the script -----------------
+                  # jq -Rn '[inputs]' = read raw lines into a JSON string array.
+                  scope_json=$(jq -Rn '[inputs]' <<<"$scope_paths")
+                  changed_json=$(jq -Rn '[inputs]' <<<"$changed")
+                  input_json=$(jq -n \
+                      --argjson scope "$scope_json" \
+                      --argjson changed "$changed_json" \
+                      '{scope: $scope, changed: $changed}')
+
+                  # ---- Run the pure-logic script -----------------------
+                  # stdout is the JSON contract; stderr captures warnings
+                  # (e.g. Node 24's ExperimentalWarning for type-stripping)
+                  # and error messages. Keeping them separate means a stray
+                  # warning never pollutes the JSON we feed to jq.
+                  #
+                  # `set +e` around the run so an unsupported-glob exit (2)
+                  # surfaces as a ::warning rather than failing the run —
+                  # drift-check stays informational on day one.
+                  set +e
+                  result=$(echo "$input_json" | node scripts/check-drift.ts 2>drift-stderr.log)
+                  rc=$?
+                  set -e
+                  if [ $rc -ne 0 ]; then
+                      echo "::warning title=Drift Check::Could not analyze drift — $(cat drift-stderr.log)"
+                      {
+                          echo "skipped=true"
+                          echo "extra_count=0"
+                          echo "extra_list<<DRIFT_EOF"
+                          echo "DRIFT_EOF"
+                      } >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  extra_count=$(jq '.extra | length' <<<"$result")
+                  extra_list=$(jq -r '.extra[]' <<<"$result")
+
+                  {
+                      echo "skipped=false"
+                      echo "extra_count=$extra_count"
+                      echo "extra_list<<DRIFT_EOF"
+                      echo "$extra_list"
+                      echo "DRIFT_EOF"
+                  } >> "$GITHUB_OUTPUT"
+
+                  if [ "$extra_count" -gt 0 ]; then
+                      echo "::notice title=Drift Check::$extra_count file(s) outside declared Scope."
+                  else
+                      echo "::notice title=Drift Check::No drift — all changes within declared Scope."
+                  fi
+
+    # ------------------------------------------------------------------
+    # Job 2: comment + label (PR write scopes — elevated only here)
+    # ------------------------------------------------------------------
+    report:
+        name: Report drift on PR
+        needs: [check]
+        # Don't run if the check job skipped (no Scope, parser error,
+        # dependabot, etc.). `needs.check.result == 'success'` is enforced
+        # implicitly because we don't override it with always()/failure().
+        if: needs.check.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            # Comments could go via either API; labels require issues: write
+            # since PR labels are issue labels under the hood.
+            pull-requests: write
+            issues: write
+        steps:
+            - name: Ensure agent-drift label exists
+              # Idempotent: `gh label create` exits non-zero if the label
+              # already exists, so swallow with `|| true`. Cheaper than
+              # listing labels first.
+              env:
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh label create agent-drift \
+                      --repo "$REPO" \
+                      --color D93F0B \
+                      --description "Files touched outside plan Scope" \
+                      2>/dev/null || true
+
+            - name: Update comment and label
+              uses: actions/github-script@v9
+              env:
+                  EXTRA_COUNT: ${{ needs.check.outputs.extra_count }}
+                  EXTRA_LIST: ${{ needs.check.outputs.extra_list }}
+                  PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+                  PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+                  EVENT_NAME: ${{ github.event_name }}
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  COMMIT_SHA: ${{ github.sha }}
+              with:
+                  script: |
+                      // HTML-comment marker is invisible in the rendered
+                      // comment but a stable needle for find-or-update.
+                      const MARKER = '<!-- drift-check:summary -->';
+                      const LABEL = 'agent-drift';
+                      const {
+                          EXTRA_COUNT, EXTRA_LIST,
+                          PR_NUMBER_EVENT, PR_NUMBER_INPUT, EVENT_NAME,
+                          RUN_URL, COMMIT_SHA,
+                      } = process.env;
+
+                      const issue_number = Number(
+                          EVENT_NAME === 'workflow_dispatch' ? PR_NUMBER_INPUT : PR_NUMBER_EVENT
+                      );
+                      const { owner, repo } = context.repo;
+                      const extraCount = Number(EXTRA_COUNT);
+                      const extraList = (EXTRA_LIST || '').split('\n').filter(Boolean);
+                      const short = COMMIT_SHA.slice(0, 7);
+
+                      let body;
+                      if (extraCount > 0) {
+                          body = [
+                              MARKER,
+                              `### Drift Check — ${short}`,
+                              '',
+                              `❗ **${extraCount} file(s) touched outside the declared Scope:**`,
+                              '',
+                              ...extraList.map(f => `- \`${f}\``),
+                              '',
+                              '_Either update the **Scope (paths/files)** block in the PR description to include these paths, or drop the out-of-scope changes._',
+                              '',
+                              `- Run: ${RUN_URL}`,
+                              `- Commit: \`${COMMIT_SHA}\``,
+                              '',
+                              '_Informational only — not a blocking check._',
+                          ].join('\n');
+                      } else {
+                          body = [
+                              MARKER,
+                              `### Drift Check — ${short}`,
+                              '',
+                              '✅ No drift — all changes within declared Scope.',
+                              '',
+                              `- Run: ${RUN_URL}`,
+                              `- Commit: \`${COMMIT_SHA}\``,
+                          ].join('\n');
+                      }
+
+                      const comments = await github.paginate(
+                          github.rest.issues.listComments,
+                          { owner, repo, issue_number, per_page: 100 },
+                      );
+                      const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+                      if (existing) {
+                          await github.rest.issues.updateComment({
+                              owner, repo, comment_id: existing.id, body,
+                          });
+                          core.info(`Updated comment ${existing.id}`);
+                      } else {
+                          await github.rest.issues.createComment({
+                              owner, repo, issue_number, body,
+                          });
+                          core.info('Created new drift comment');
+                      }
+
+                      if (extraCount > 0) {
+                          await github.rest.issues.addLabels({
+                              owner, repo, issue_number, labels: [LABEL],
+                          });
+                          core.info(`Added label ${LABEL}`);
+                      } else {
+                          try {
+                              await github.rest.issues.removeLabel({
+                                  owner, repo, issue_number, name: LABEL,
+                              });
+                              core.info(`Removed label ${LABEL}`);
+                          } catch (e) {
+                              // 404 = label wasn't applied; that's fine.
+                              if (e.status !== 404) throw e;
+                          }
+                      }

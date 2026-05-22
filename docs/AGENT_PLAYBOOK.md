@@ -13,6 +13,7 @@ Operational runbook for agents (Claude Code, Copilot, future custom agents) when
 - [GitHub token semantics](#github-token-semantics) — why workflows sometimes don't trigger other workflows
 - [Hooks dependencies](#hooks-dependencies) — what the Claude hooks need installed locally, and how to read the audit log
 - [Memory](#memory) — where agent memory lives across a task's lifetime
+- [Drift detection](#drift-detection) — what the `agent-drift` label means and how to clear it
 
 ---
 
@@ -260,3 +261,26 @@ The directory is per-machine — there's no shared log, no remote sync, no reten
 ## Memory
 
 Agent memory lives in three tiers — short-term (the PR's `## Plan` block), long-term (`docs/agent-tasks/<task-id>/memory.md` and `decisions.md`), and external (workflow runs, uploaded artifacts, Vercel previews, GitHub issues). The pruning rule, the `<task-id>` naming convention, and the rationale for the split all live in [`MEMORY_POLICY.md`](MEMORY_POLICY.md). The `agent-artifact-check.yml` workflow (see [`WORKFLOWS.md`](WORKFLOWS.md)) enforces that agent-shaped PRs add or reference a `plan.md`.
+
+---
+
+## Drift detection
+
+The `drift-check.yml` workflow (see [`WORKFLOWS.md`](WORKFLOWS.md)) compares this PR's changed files against the paths declared in its `- **Scope (paths/files):**` bullet block. When the diff touches something that doesn't match any Scope pattern, the workflow posts a comment listing the out-of-scope files (marker: `<!-- drift-check:summary -->`) and applies the `agent-drift` label.
+
+The check is **informational only** — it never fails the run and is not a required status check. The label is a reviewer cue, not a merge block.
+
+### How to clear the `agent-drift` label
+
+Pick one:
+
+- **Scope expanded intentionally** — update the `- **Scope (paths/files):**` block in the PR description to include the now-touched paths. The next push (or a `workflow_dispatch` re-run with the `pr_number` input) removes the label and updates the comment to "✅ No drift."
+- **Out-of-scope changes were unintentional** — drop them in a fresh commit. Same re-run rules apply.
+
+Removing the label by hand without one of those moves is pointless — the next run reapplies it.
+
+### When the workflow skips
+
+- `dependabot[bot]` PRs are exempt (no Scope block to compare against). Same exemption shape as `plan-gate.yml` and `agent-artifact-check.yml`.
+- Empty or unparseable Scope block → `::notice` + exit 0 (no comment, no label). `plan-gate` enforces Plan presence separately, so drift-check stays silent rather than double-reporting.
+- Unsupported glob character in a Scope entry (`{`, `}`, `?`, `!`) → `::warning` + exit 0. Simplify the entry to the supported subset: literal paths, `*`, `**`, or trailing `/`.
