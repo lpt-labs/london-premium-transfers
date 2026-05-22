@@ -166,6 +166,18 @@ sequenceDiagram
 | `.github/actions/retry-step/action.yml` | Any workflow wrapping a transient command (network call, npm install, etc.) | Bash retry loop with configurable `max-attempts` (default 3) and `delay-seconds` (default 5). Surfaces all attempts' output on final failure so transient-looking but real bugs aren't silently hidden. |
 | `.github/workflows/CLAUDE.md` | Loaded automatically by Claude Code when editing any file under `.github/workflows/` | Path-scoped rules for editing workflow files (least-privilege permissions, defensive triggers, action pinning, command-injection safety, artifact naming). Not a workflow itself. |
 
+### Dormant configurations
+
+| File | Purpose | Why dormant |
+| --- | --- | --- |
+| `.github/workflows/daily-repo-status.md` | GitHub Agentic Workflow (gh-aw) source for a daily 24h activity digest. Would, on activation, open one issue per day with title prefix `[repo-status] ` and label `report`. | gh-aw is not installed in this repo and no GitHub Copilot license is active, so nothing compiles the `.md` into the sibling `.lock.yml` that Actions would run. The `.md` extension alone is invisible to the runner. Frontmatter shape, threat model, and activation steps live in [`docs/COPILOT_STUDY/agentic-workflows.md`](COPILOT_STUDY/agentic-workflows.md). Not in the flowchart or sequence diagram above on purpose — adding a phantom node for a workflow that does not fire would mislead readers. |
+
+### External scheduled agents
+
+| Where it runs | Purpose | Snapshot in this repo |
+| --- | --- | --- |
+| Claude Code Routine (Claude web UI at <https://claude.ai/code>) | Daily 24h activity digest — same job as the dormant gh-aw source above. Opens one issue per day with title prefix `[repo-status] ` and label `report`. | [`docs/CLAUDE_ROUTINES/daily-repo-status.md`](CLAUDE_ROUTINES/daily-repo-status.md). The routine's source of truth is the web UI, not this repo; the snapshot doc records what is configured so reviewers can see the full set of scheduled agents touching this codebase without leaving the repo. |
+
 ## Plan-gate exemption — why Dependabot is special
 
 `plan-gate.yml` skips its job when `github.actor == 'dependabot[bot]'`. Reason: Dependabot's PRs use a structured changelog format (security advisory, version diff, compatibility score) that IS the plan in spirit but doesn't match the `## Plan (required)` shape. Forcing Dependabot through the gate would block every dependency update; exempting it lets the security-update pipeline flow.
