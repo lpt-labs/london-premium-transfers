@@ -291,7 +291,12 @@ jobs:
               # `--max-redirects 5` — Vercel preview routes can include
               # an auth-redirect chain; 5 is comfortably above that.
               # `--no-progress` — strip \r-based progress bars from CI logs.
-              # `--format json` — machine-readable for parsing.
+              # `format: json` — the action input controls what's written to
+              #   the `output:` file. It defaults to `markdown`, so omitting
+              #   it produced a Markdown summary in `lychee.json` and broke
+              #   the downstream `jq` parser. A `--format json` flag in
+              #   `args:` only affects lychee's stdout, not the output file —
+              #   they're separate knobs.
               # `fail: false` — record broken links, don't fail the job.
               #
               # SHA pin: TODO(L3) — look up before merge:
@@ -299,7 +304,8 @@ jobs:
               uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2
               id: lychee
               with:
-                  args: --max-redirects 5 --no-progress --format json ${{ needs.resolve.outputs.preview_url }}
+                  args: --max-redirects 5 --no-progress ${{ needs.resolve.outputs.preview_url }}
+                  format: json
                   output: lychee.json
                   fail: false
 
