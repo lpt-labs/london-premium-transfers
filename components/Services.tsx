@@ -1,3 +1,5 @@
+import Link from "next/link"
+
 const services = [
   {
     id: "01",
@@ -38,6 +40,7 @@ export default function Services() {
             Every journey,{" "}
             <em className="font-serif font-normal italic">exactly right</em>
           </h2>
+          <Link href="/book" className="mt-8 inline-flex items-center rounded-full bg-accent px-7 py-3.5 text-sm font-medium text-paper transition-colors hover:bg-accent-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2">Book a transfer</Link>
         </header>
         <ul
           className="grid gap-px overflow-hidden rounded-l bg-line shadow-s2 sm:grid-cols-2 lg:grid-cols-4"
