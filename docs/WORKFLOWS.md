@@ -14,11 +14,13 @@ flowchart LR
     COMMENT([Issue or PR comment])
     DISPATCH([workflow_dispatch / manual])
     DEPENDABOT([Dependabot push])
+    VERCEL_DEPLOY_SUCCESS([Vercel preview live])
 
     %% Workflows
     PLAN_GATE[plan-gate.yml]
     ARTIFACT_CHECK[agent-artifact-check.yml]
     DRIFT[drift-check.yml]
+    EVAL[eval.yml]
     AGENT_CI[agent-ci.yml]
     CLAUDE[claude.yml]
     CLAUDE_REVIEW[claude-code-review.yml]
@@ -33,6 +35,7 @@ flowchart LR
     PR_COMMENT[/PR comment/]
     LABEL_DRIFT[/agent-drift label/]
     ARTIFACT[/Workflow artifact<br/>logs-RUN-SHA/]
+    ARTIFACT_EVAL[/Workflow artifact<br/>eval-RUN-SHA/]
     BOT_PR[/Bot creates branch + PR/]
     VERCEL_PREVIEW[/Vercel preview URL/]
     PROD_DEPLOY[/Production deploy<br/>via env gate/]
@@ -53,6 +56,12 @@ flowchart LR
     DRIFT --> INFO_CHECK
     DRIFT --> PR_COMMENT
     DRIFT --> LABEL_DRIFT
+
+    VERCEL_DEPLOY_SUCCESS --> EVAL
+    DISPATCH --> EVAL
+    DEPENDABOT -.exempt.-> EVAL
+    EVAL --> PR_COMMENT
+    EVAL --> ARTIFACT_EVAL
 
     PR_OPEN --> AGENT_CI
     AGENT_CI --> INFO_CHECK
@@ -76,9 +85,9 @@ flowchart LR
     classDef output fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef gate fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
 
-    class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT trigger
-    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,AGENT_CI,CLAUDE,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
-    class PR_COMMENT,LABEL_DRIFT,ARTIFACT,BOT_PR,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
+    class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT,VERCEL_DEPLOY_SUCCESS trigger
+    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,EVAL,AGENT_CI,CLAUDE,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
+    class PR_COMMENT,LABEL_DRIFT,ARTIFACT,ARTIFACT_EVAL,BOT_PR,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
     class REQUIRED_CHECK gate
 ```
 
@@ -141,6 +150,7 @@ sequenceDiagram
 | `plan-gate.yml` | PR `opened`, `edited`, `synchronize`, `reopened`, `ready_for_review` (excludes `dependabot[bot]` via `if:`) | `contents: read`, `pull-requests: read` | Status check validating the `## Plan (required)` section exists with non-empty Goal + at least one Step | ✅ Required (configured in `protect-main` ruleset) |
 | `agent-artifact-check.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `edited`, `labeled`, `unlabeled` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]` and for PRs that are neither on a `claude/**`/`agent/**` branch nor labeled `agent-task`. | `contents: read`, `pull-requests: read` | Informational status check verifying an agent-shaped PR adds or references a `docs/agent-tasks/<task-id>/plan.md` file (see `docs/MEMORY_POLICY.md`) | Informational on day one — promote to required only after a few green runs on real agent PRs |
 | `drift-check.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `edited` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]`. | Read-only `check` job: `contents: read`, `pull-requests: read`. Write-elevated `report` job: `contents: read`, `pull-requests: write`, `issues: write` (the labels API lives under issues). | Find-or-update PR comment listing files touched outside the plan's `- **Scope (paths/files):**` block; toggles the `agent-drift` label. Always exits 0. | Informational on day one — never fails the run; promote to required only after a few real PRs show the signal is reliable |
+| `eval.yml` | `deployment_status` events where `deployment.environment == 'Preview'` and `state == 'success'` (i.e. the Vercel preview is live), plus `workflow_dispatch` with a `pr_number` input for manual re-runs / backfills. Skips for Dependabot PRs (author lookup), for production deployment_status events, and for non-success states. | Workflow baseline `contents: read`. `resolve` job adds `pull-requests: read` for PR/deployment lookups. `summary` job elevates to `pull-requests: write` only — comment-write scope is per-job, not workflow-wide. | Find-or-update PR comment with marker `<!-- eval:scorecard -->` containing the four-tool scorecard table (Lighthouse, axe-core, lychee, type-coverage). Consolidated artifact `eval-<run-id>-<sha>` (90-day retention) bundling `lighthouseci/`, `axe.json`, `lychee.json`, `type-coverage.txt`; per-tool intermediates `eval-<tool>-<run-id>-<sha>` (14-day retention) re-uploaded into the consolidated artifact by the summary job. Always exits 0. | Informational — thresholds, the qual fidelity checklist, and the promotion path documented in [`EVAL.md`](EVAL.md) |
 | `agent-ci.yml` | PR `opened` / `synchronize` on `agent/**` and `feat/**` branches | `contents: read`, `pull-requests: write` | Lint, typecheck, build status checks; PR comment summary; uploaded artifact named `logs-<run-id>-<sha>` | Informational (could be made required via ruleset) |
 | `claude.yml` | Agent mention (currently the trigger string is `@claude`) in issue body/title, issue comment, PR comment, or PR review | `contents: read`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read` | Agent runs the requested task in a runner; commits to a branch; opens/updates a PR; posts a status comment on the originating issue/PR | n/a (not a status check) |
 | `claude-code-review.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review` | `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write` | Posts review comments from the official `code-review` plugin | Informational (review comments) |
@@ -165,6 +175,8 @@ The exemption is narrow on purpose: `dependabot[bot]` only, not `*[bot]`. Any ot
 `agent-artifact-check.yml` mirrors the same Dependabot exemption (and adds a second skip for human PRs that aren't agent-shaped) — same reasoning: Dependabot's PRs don't need a `docs/agent-tasks/<task-id>/plan.md` because they're not agent-authored tasks. See `docs/MEMORY_POLICY.md` for the artifact requirement itself.
 
 `drift-check.yml` also exempts `dependabot[bot]` — its PRs ship a structured changelog, not a plan with a `Scope (paths/files)` block, so there's nothing to drift-check against. The workflow is **soft-rolled-out**: it posts an informational comment and (if drift is detected) applies the `agent-drift` label, but never fails the run. Promote to a required status check only after a few real agent PRs show the signal is reliable.
+
+`eval.yml` exempts Dependabot too — and because it fires on `deployment_status` (where `github.actor` is `vercel[bot]`, not the PR author), the exemption is checked against the *PR author* after the workflow resolves the PR number from the deployment SHA. Reasoning is economy plus signal: a dep-bump preview rarely moves Lighthouse, axe, or link-check numbers, and running the four-job scorecard on every Renovate-style PR would burn ~8 CI minutes per bump for no useful diff. Soft-rolled-out like `drift-check.yml` — scorecard comment + `eval-<run-id>-<sha>` artifact, never a failing status check. See [`docs/EVAL.md`](EVAL.md) for thresholds and the promotion path.
 
 See the inline comment in `.github/workflows/plan-gate.yml` for the canonical justification.
 
