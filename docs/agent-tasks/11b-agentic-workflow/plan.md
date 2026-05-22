@@ -7,7 +7,7 @@
 
 - **Scope (paths/files):**
   - `docs/agent-tasks/11b-agentic-workflow/plan.md` (this file)
-  - `.github/aw/daily-repo-status.md` (new — dormant GitHub Agentic Workflow; path confirmed against current `githubnext/gh-aw` spec at implementation time; fall back to `.github/workflows/daily-repo-status.agent.md` if the AW convention has shifted)
+  - `.github/workflows/daily-repo-status.md` (new — dormant GitHub Agentic Workflow; path matches the current `githubnext/gh-aw` spec verified at implementation time — workflow sources live alongside Actions YAML and are distinguished by the `.md` extension, which GitHub Actions itself ignores)
   - `docs/COPILOT_STUDY/agentic-workflows.md` (new — frontmatter semantics + guardrails)
   - `docs/CLAUDE_ROUTINES/daily-repo-status.md` (new — Claude web-UI routine config snapshot)
   - `docs/WORKFLOWS.md` (small update — add a "Dormant configs" subsection noting the file does not fire in this repo today)
@@ -15,7 +15,7 @@
 
 - **Steps:**
   1. Add this plan file.
-  2. Add the dormant agentic workflow at `.github/aw/daily-repo-status.md` (verify the path against the latest `githubnext/gh-aw` README at implementation time — the spec was still moving as of 2026-05). Frontmatter shape:
+  2. Add the dormant agentic workflow at `.github/workflows/daily-repo-status.md` (path verified at implementation time against the latest `githubnext/gh-aw` README — current spec colocates `.md` sources with Actions YAML; the `.md` extension keeps the file invisible to the Actions runner while still being parseable by gh-aw). Frontmatter shape:
      - `on: schedule: { cron: "0 9 * * *" }` — daily 09:00 UTC.
      - `permissions:` read-only across `contents`, `issues`, `pull-requests`.
      - `safe-outputs: create-issue:` with `title-prefix: "[repo-status] "` and `labels: [report]` — the only side effect this workflow may produce.
@@ -35,13 +35,13 @@
      - **Where to verify**: link to the Claude Code Routines settings page; note that the routine itself isn't versioned in this repo (lives in Claude's web UI).
   5. Update `docs/WORKFLOWS.md`:
      - Do NOT add the agentic file to the flowchart or sequence diagram (it doesn't fire here).
-     - Add a short **"Dormant configurations"** subsection below "Composite actions and shared files" listing `.github/aw/daily-repo-status.md` with one sentence on its purpose and license dependency.
+     - Add a short **"Dormant configurations"** subsection below "Composite actions and shared files" listing `.github/workflows/daily-repo-status.md` with one sentence on its purpose and license dependency.
      - Add a sibling **"External scheduled agents"** subsection pointing to `docs/CLAUDE_ROUTINES/daily-repo-status.md` so readers know the active equivalent lives there.
   6. (Optional) Cross-reference both files from `docs/AGENT_PLAYBOOK.md` under a new "Scheduled / autonomous workflows" subsection — one line each.
 
 - **Success criteria (verifiable):**
   - [ ] Required CI checks pass (`plan-gate`, `agent-ci`, `agent-artifact-check`, `drift-check` informational, `eval` informational).
-  - [ ] `.github/aw/daily-repo-status.md` parses as well-formed YAML frontmatter + Markdown body. Verified with a `yamllint`/`yq` step locally OR by visual review against the gh-aw README.
+  - [ ] `.github/workflows/daily-repo-status.md` parses as well-formed YAML frontmatter + Markdown body. Verified with a `yamllint`/`yq` step locally OR by visual review against the gh-aw README.
   - [ ] `docs/COPILOT_STUDY/agentic-workflows.md` covers all five guardrail items (read-only token default, safe-outputs as separate gated step, no plaintext secrets, sandbox + network allowlist, threat detection) — each in the author's own words, no verbatim text from Microsoft Learn.
   - [ ] `docs/CLAUDE_ROUTINES/daily-repo-status.md` exists and reflects the actual routine the user configured (prompt, schedule, connectors).
   - [ ] At least one daily `[repo-status]` issue with `report` label has been created by the Claude Routine (or the user has explicitly noted the routine is configured and a first run is pending; this can land before the routine has fired once if needed).
