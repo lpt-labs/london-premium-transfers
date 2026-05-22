@@ -32,3 +32,9 @@ Short and concrete. Explain new concepts (React component, server vs client comp
 ## Naming
 
 Do not reference this project's exam-prep framing in any file destined for the repo other than `README.md`. Production-facing files (issue templates, PR template, instruction files, workflows, agent definitions, this file's siblings) describe rules in their own terms.
+
+## Lessons
+
+Rules extracted from agent postmortems in [`docs/agent-failures/`](docs/agent-failures/). Each rule names a concrete trigger and a concrete behavior. When you hit the trigger, follow the rule.
+
+- **When implementing a step where the plan authorises a judgement call on a path or file shape, update the plan's `Scope (paths/files)` block (and the PR-body Scope mirror) in the same commit as the deviation — not in a follow-up commit, and never after `drift-check` has flagged it** (see [docs/agent-failures/2026-05-22-update-scope-on-path-divergence.md](docs/agent-failures/2026-05-22-update-scope-on-path-divergence.md)).

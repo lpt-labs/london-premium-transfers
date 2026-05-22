@@ -29,6 +29,12 @@ Read [`AGENTS.md`](../AGENTS.md) first — that's the full operating contract. T
 - **Never edit `.github/workflows/**`, `.github/actions/**`, `.github/hooks/**`, `.github/agents/**`, `package.json`, `pnpm-lock.yaml`, or `next.config.ts`** without the `infra-change` label on the PR.
 - **Artifacts uploaded by workflows must be named `<purpose>-${{ github.run_id }}-${{ github.sha }}`** so every artifact traces back to a run and a commit.
 
+## Lessons
+
+Rules extracted from agent postmortems in [`docs/agent-failures/`](../docs/agent-failures/). Each rule names a concrete trigger and a concrete behavior. When you hit the trigger, follow the rule.
+
+- **When implementing a step where the plan authorises a judgement call on a path or file shape, update the plan's `Scope (paths/files)` block (and the PR-body Scope mirror) in the same commit as the deviation — not in a follow-up commit, and never after `drift-check` has flagged it** (see [docs/agent-failures/2026-05-22-update-scope-on-path-divergence.md](../docs/agent-failures/2026-05-22-update-scope-on-path-divergence.md)).
+
 ## When you're unsure
 
 Ask in the issue or PR. Don't guess on architecture, on dependencies, or on whether something is in scope. A clarifying question is cheaper than a wrong PR.
