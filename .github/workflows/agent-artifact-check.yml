@@ -1,0 +1,127 @@
+name: Agent Artifact Check
+
+# Require any agent-shaped PR (branch matches `claude/**` or `agent/**`, OR
+# the PR carries the `agent-task` label) to either add/modify a
+# `docs/agent-tasks/<task-id>/plan.md` file, or reference one in its body.
+# Documents the working contract in `docs/MEMORY_POLICY.md`.
+#
+# Stays informational on day one — not promoted to a required status check
+# until it's been green on a few real agent PRs.
+
+on:
+  pull_request:
+    # `edited` is included so a PR can pass the check by adding a plan path
+    # to its body. `labeled`/`unlabeled` are included because adding/removing
+    # the `agent-task` label flips the skip condition.
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to re-check.
+        required: true
+        type: string
+
+# Least-privilege: read PR metadata + diff file list only. No write scopes.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Plan artifact present for agent-shaped PR
+    # Defensive trigger guard — protects against later additions of unrelated
+    # triggers (cron, etc.). Same pattern as plan-gate.yml.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for plan.md artifact
+        # All PR-author-controlled values flow through env, never interpolated
+        # directly into shell — see the command-injection-safety rule in
+        # `.github/workflows/CLAUDE.md` and the canonical pattern in
+        # `plan-gate.yml`.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+          PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # ---- Resolve PR number for this run ----------------------------
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # pr_number flows into a `gh` API call. Validate it's purely
+            # numeric so an unvalidated input can't probe arbitrary paths.
+            if ! [[ "${PR_NUMBER_INPUT:-}" =~ ^[0-9]+$ ]]; then
+              echo "::error title=Bad input::workflow_dispatch input pr_number must be a positive integer (got '${PR_NUMBER_INPUT:-}')."
+              exit 1
+            fi
+            PR_NUMBER="$PR_NUMBER_INPUT"
+          else
+            PR_NUMBER="$PR_NUMBER_EVENT"
+          fi
+
+          # ---- Fetch PR metadata in one round-trip -----------------------
+          json=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json author,headRefName,labels,body,files)
+
+          author=$(jq -r '.author.login // ""' <<<"$json")
+          head_ref=$(jq -r '.headRefName // ""' <<<"$json")
+          labels=$(jq -r '[.labels[].name] | join(",")' <<<"$json")
+          body=$(jq -r '.body // ""' <<<"$json")
+          # `additions > 0` covers added + modified + rename-with-changes;
+          # pure deletions of a plan.md don't count toward "PR includes a plan".
+          files=$(jq -r '[.files[] | select(.additions > 0) | .path] | join("\n")' <<<"$json")
+
+          # ---- Skip conditions -------------------------------------------
+          # Skip 1 — dependabot[bot]. Same exemption shape as plan-gate.yml,
+          # but checked against PR author *and* github.actor so an edit event
+          # on a dependabot PR (where actor may be a human) still exempts.
+          if [ "$author" = "dependabot[bot]" ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+            echo "::notice title=Agent Artifact Check skipped::PR authored by dependabot[bot]; exempt (matches plan-gate.yml policy)."
+            exit 0
+          fi
+
+          # Skip 2 — non-agent PR. The check only applies when the branch
+          # looks agent-shaped OR the PR carries the `agent-task` label.
+          agent_branch=false
+          case "$head_ref" in
+            claude/*|agent/*) agent_branch=true ;;
+          esac
+
+          # Wrap with commas on both sides so we match whole label names
+          # (avoid e.g. "agent-task" matching "x-agent-task").
+          agent_label=false
+          if [[ ",${labels}," == *",agent-task,"* ]]; then
+            agent_label=true
+          fi
+
+          if [ "$agent_branch" = "false" ] && [ "$agent_label" = "false" ]; then
+            echo "::notice title=Agent Artifact Check skipped::Branch '$head_ref' is not agent-shaped (claude/** or agent/**) and the PR is not labeled 'agent-task'. No artifact required."
+            exit 0
+          fi
+
+          # ---- Pass conditions -------------------------------------------
+          # Pass A — the PR diff adds/modifies a docs/agent-tasks/<id>/plan.md.
+          if grep -qE '^docs/agent-tasks/[^/]+/plan\.md$' <<<"$files"; then
+            echo "::notice title=Agent Artifact Check passed::PR diff includes a docs/agent-tasks/<task-id>/plan.md file."
+            exit 0
+          fi
+
+          # Pass B — the PR body references such a path (e.g., the plan was
+          # committed in a prior PR and this PR continues the work).
+          if grep -qE 'docs/agent-tasks/[^/]+/plan\.md' <<<"$body"; then
+            echo "::notice title=Agent Artifact Check passed::PR body references a docs/agent-tasks/<task-id>/plan.md path."
+            exit 0
+          fi
+
+          # ---- Fail ------------------------------------------------------
+          echo "::error title=Agent Artifact Check failed::This PR looks agent-shaped (branch '$head_ref' or label 'agent-task') but neither adds nor references a docs/agent-tasks/<task-id>/plan.md file."
+          echo ""
+          echo "Either:"
+          echo "  (a) Add docs/agent-tasks/<task-id>/plan.md to this PR. Copy docs/agent-tasks/_template/plan.md and fill it in."
+          echo "  (b) If the plan was committed in a previous PR, reference its path in this PR's body."
+          echo ""
+          echo "See docs/MEMORY_POLICY.md for the memory-tier model and the <task-id> naming convention."
+          exit 1
