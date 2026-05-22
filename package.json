@@ -13,7 +13,8 @@
     "start": "next start",
     "lint": "eslint",
     "prepare": "husky",
-    "test:drift": "node --disable-warning=ExperimentalWarning --test scripts/check-drift.test.ts"
+    "test:drift": "node --disable-warning=ExperimentalWarning --test scripts/check-drift.test.ts",
+    "test:quote": "node --disable-warning=ExperimentalWarning --test lib/booking/quote.test.ts"
   },
   "dependencies": {
     "next": "16.2.6",
