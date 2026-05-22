@@ -131,15 +131,20 @@ jobs:
                       '{scope: $scope, changed: $changed}')
 
                   # ---- Run the pure-logic script -----------------------
-                  # Disable -e around this so an unsupported-glob exit (2)
+                  # stdout is the JSON contract; stderr captures warnings
+                  # (e.g. Node 24's ExperimentalWarning for type-stripping)
+                  # and error messages. Keeping them separate means a stray
+                  # warning never pollutes the JSON we feed to jq.
+                  #
+                  # `set +e` around the run so an unsupported-glob exit (2)
                   # surfaces as a ::warning rather than failing the run —
                   # drift-check stays informational on day one.
                   set +e
-                  result=$(echo "$input_json" | node scripts/check-drift.ts 2>&1)
+                  result=$(echo "$input_json" | node scripts/check-drift.ts 2>drift-stderr.log)
                   rc=$?
                   set -e
                   if [ $rc -ne 0 ]; then
-                      echo "::warning title=Drift Check::Could not analyze drift — $result"
+                      echo "::warning title=Drift Check::Could not analyze drift — $(cat drift-stderr.log)"
                       {
                           echo "skipped=true"
                           echo "extra_count=0"
