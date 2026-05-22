@@ -14,6 +14,7 @@ Operational runbook for agents (Claude Code, Copilot, future custom agents) when
 - [Hooks dependencies](#hooks-dependencies) — what the Claude hooks need installed locally, and how to read the audit log
 - [Memory](#memory) — where agent memory lives across a task's lifetime
 - [Drift detection](#drift-detection) — what the `agent-drift` label means and how to clear it
+- [Eval scorecard](#eval-scorecard) — what the `<!-- eval:scorecard -->` comment means and where the raw reports live
 
 ---
 
@@ -284,3 +285,38 @@ Removing the label by hand without one of those moves is pointless — the next 
 - `dependabot[bot]` PRs are exempt (no Scope block to compare against). Same exemption shape as `plan-gate.yml` and `agent-artifact-check.yml`.
 - Empty or unparseable Scope block → `::notice` + exit 0 (no comment, no label). `plan-gate` enforces Plan presence separately, so drift-check stays silent rather than double-reporting.
 - Unsupported glob character in a Scope entry (`{`, `}`, `?`, `!`) → `::warning` + exit 0. Simplify the entry to the supported subset: literal paths, `*`, `**`, or trailing `/`.
+
+---
+
+## Eval scorecard
+
+The `eval.yml` workflow (see [`WORKFLOWS.md`](WORKFLOWS.md)) runs a four-tool scorecard against every Vercel preview deploy — Lighthouse, axe-core a11y, lychee link check, and `type-coverage` — and posts a single find-or-update PR comment with the results (marker: `<!-- eval:scorecard -->`).
+
+Like `drift-check.yml`, the scorecard is **informational only** — it never fails the run and is not a required status check. Threshold definitions, the qual fidelity checklist for feature PRs, and the promotion path to required-status are all in [`EVAL.md`](EVAL.md).
+
+### Where the raw reports live
+
+Each scorecard comment links to a workflow run; that run uploads a consolidated artifact named `eval-<run-id>-<sha>` (90-day retention) containing:
+
+- `lighthouseci/` — Lighthouse HTML + JSON reports (3 runs per category, median reported in the comment).
+- `axe.json` — axe-core's full violation list, including the `moderate` and `minor` impacts that aren't surfaced in the comment table.
+- `lychee.json` — link checker JSON, including HTTP code per URL.
+- `type-coverage.txt` — `--detail` listing of every `any`-leaking site.
+
+Per-tool intermediates (`eval-<tool>-<run-id>-<sha>`) are also uploaded with a shorter 14-day retention and merged into the consolidated artifact by the summary job. For analysis longer than 90 days, download the artifact and check the relevant excerpts into a follow-up plan's `decisions.md`.
+
+### Manually re-running on a specific PR
+
+Same shape as `drift-check.yml` and `agent-artifact-check.yml`:
+
+```bash
+gh workflow run eval.yml -f pr_number=<pr-number>
+```
+
+The workflow resolves the most recent successful Preview deployment for that PR's head SHA, scores it, and updates (or creates) the scorecard comment on the PR. Useful for backfilling a scorecard onto an already-merged PR (e.g. the homepage PR was the v4 plan's acceptance test), or for retrying after a workflow tweak.
+
+### When the workflow skips
+
+- Dependabot PRs are exempt (checked against the PR author rather than `github.actor`, because `deployment_status` events come from `vercel[bot]`). Same reasoning as the other Dependabot exemptions in [`WORKFLOWS.md`](WORKFLOWS.md) — dep-bump previews rarely move scorecard numbers.
+- `deployment_status` events for `Production` environments or `state != 'success'` are skipped — eval only scores live, successful Preview deploys.
+- `workflow_dispatch` with no matching Preview deployment for the PR's head SHA → `::warning` + exit 0 (no comment, no artifact).

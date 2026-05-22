@@ -1,0 +1,518 @@
+name: Eval
+
+# Runs a four-tool eval scorecard against every Vercel preview deploy and
+# posts a single find-or-update PR comment with the results. Tools:
+#   - Lighthouse (perf/a11y/best-practices/seo)
+#   - axe-core (a11y violations by impact)
+#   - lychee (broken links)
+#   - type-coverage (% of explicitly typed expressions)
+#
+# Thresholds + soft-rollout posture documented in docs/EVAL.md.
+# Informational only on day one — never fails the run, never a required
+# status check. Same posture as agent-artifact-check.yml and drift-check.yml.
+
+on:
+    # Cleanest "preview is live" signal. Vercel posts a deployment_status
+    # event with state=success and a target_url after each preview build
+    # finishes — far better than reacting to pull_request opens (which
+    # fire long before the preview exists).
+    deployment_status:
+
+    # Manual re-run / backfill — score an already-merged PR, or retry after
+    # a workflow tweak. Same pattern as drift-check.yml / agent-artifact-check.yml.
+    workflow_dispatch:
+        inputs:
+            pr_number:
+                description: PR number to score.
+                required: true
+                type: string
+
+# Least-privilege baseline. Only the summary job elevates to pull-requests:write.
+permissions:
+    contents: read
+
+# Cancel an in-flight run when a fresher event lands for the same PR/sha.
+# Saves CI minutes and keeps the scorecard tied to the latest preview.
+concurrency:
+    group: eval-${{ github.event.deployment.sha || github.event.inputs.pr_number || github.ref }}
+    cancel-in-progress: true
+
+env:
+    NODE_VERSION: ${{ vars.NODE_VERSION || '24' }}
+    PNPM_VERSION: ${{ vars.PNPM_VERSION || '11' }}
+
+jobs:
+    # ------------------------------------------------------------------
+    # Job 0: resolve — figure out PR number, preview URL, author.
+    # All skip-condition logic lives here so downstream jobs can gate on
+    # a single `needs.resolve.outputs.skipped == 'false'` flag.
+    # ------------------------------------------------------------------
+    resolve:
+        name: Resolve PR + preview URL
+        # Defensive trigger guard — protects against later additions of cron
+        # etc. (workflow CLAUDE.md rule). We only score *successful Preview*
+        # deployments; production deploys are out of scope.
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Preview')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: read
+        outputs:
+            skipped: ${{ steps.resolve.outputs.skipped }}
+            pr_number: ${{ steps.resolve.outputs.pr_number }}
+            preview_url: ${{ steps.resolve.outputs.preview_url }}
+        steps:
+            - name: Resolve PR number, preview URL, author
+              id: resolve
+              # All PR-author-controllable values flow through env, never
+              # interpolated directly into shell. Pattern from plan-gate.yml.
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+                  DEPLOYMENT_SHA: ${{ github.event.deployment.sha }}
+                  DEPLOYMENT_TARGET_URL: ${{ github.event.deployment_status.target_url }}
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                      # Same numeric-validation pattern as drift-check.yml — an
+                      # unvalidated input could otherwise probe arbitrary gh paths.
+                      if ! [[ "${PR_NUMBER_INPUT:-}" =~ ^[0-9]+$ ]]; then
+                          echo "::error title=Bad input::pr_number input must be a positive integer (got '${PR_NUMBER_INPUT:-}')."
+                          exit 1
+                      fi
+                      PR_NUMBER="$PR_NUMBER_INPUT"
+
+                      # Look up the most recent Preview deployment for the PR's head SHA.
+                      head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid // ""')
+                      if [ -z "$head_sha" ]; then
+                          echo "::warning title=Eval skipped::Could not resolve head SHA for PR #$PR_NUMBER."
+                          echo "skipped=true" >> "$GITHUB_OUTPUT"
+                          exit 0
+                      fi
+                      deployment_id=$(gh api "repos/$REPO/deployments?sha=$head_sha&environment=Preview" --jq '.[0].id // empty')
+                      if [ -z "$deployment_id" ]; then
+                          echo "::warning title=Eval skipped::No Preview deployment found for PR #$PR_NUMBER (head $head_sha)."
+                          echo "skipped=true" >> "$GITHUB_OUTPUT"
+                          exit 0
+                      fi
+                      PREVIEW_URL=$(gh api "repos/$REPO/deployments/$deployment_id/statuses" --jq '[.[] | select(.state == "success")][0].target_url // empty')
+                      if [ -z "$PREVIEW_URL" ]; then
+                          echo "::warning title=Eval skipped::No successful status with target_url for deployment $deployment_id."
+                          echo "skipped=true" >> "$GITHUB_OUTPUT"
+                          exit 0
+                      fi
+                  else
+                      # deployment_status payload doesn't carry PR number directly.
+                      # The "List pull requests associated with a commit" API gives us
+                      # the PR(s) whose head matches the deployed SHA — there should
+                      # be exactly one in practice; .[0] handles the edge case of
+                      # cross-branch SHA reuse by picking the most recent.
+                      PR_NUMBER=$(gh api "repos/$REPO/commits/$DEPLOYMENT_SHA/pulls" --jq '.[0].number // empty')
+                      if [ -z "$PR_NUMBER" ]; then
+                          echo "::notice title=Eval skipped::No PR found for deployment SHA $DEPLOYMENT_SHA (likely a direct push to main)."
+                          echo "skipped=true" >> "$GITHUB_OUTPUT"
+                          exit 0
+                      fi
+                      PREVIEW_URL="$DEPLOYMENT_TARGET_URL"
+                  fi
+
+                  # Dependabot exemption — same shape as plan-gate.yml /
+                  # drift-check.yml / agent-artifact-check.yml. For
+                  # deployment_status events github.actor is vercel[bot], not
+                  # the PR author, so we look up the author after resolving
+                  # the PR number.
+                  PR_AUTHOR=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json author --jq '.author.login // ""')
+                  if [ "$PR_AUTHOR" = "dependabot" ] || [ "$PR_AUTHOR" = "dependabot[bot]" ]; then
+                      echo "::notice title=Eval skipped::PR #$PR_NUMBER authored by Dependabot (same exemption as plan-gate.yml / drift-check.yml — eval against a dep-bump preview rarely changes Lighthouse and burns CI minutes)."
+                      echo "skipped=true" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  {
+                      echo "skipped=false"
+                      echo "pr_number=$PR_NUMBER"
+                      echo "preview_url=$PREVIEW_URL"
+                  } >> "$GITHUB_OUTPUT"
+                  echo "::notice title=Eval::Will score PR #$PR_NUMBER against $PREVIEW_URL."
+
+    # ------------------------------------------------------------------
+    # Job 1: Lighthouse (perf / a11y / best-practices / seo)
+    # ------------------------------------------------------------------
+    lighthouse:
+        name: Lighthouse
+        needs: [resolve]
+        if: needs.resolve.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        outputs:
+            perf: ${{ steps.lh.outputs.perf }}
+            a11y: ${{ steps.lh.outputs.a11y }}
+            bp: ${{ steps.lh.outputs.bp }}
+            seo: ${{ steps.lh.outputs.seo }}
+        steps:
+            - name: Checkout (needed for .lighthouserc.json)
+              uses: actions/checkout@v6
+
+            - name: Run Lighthouse CI
+              # 3-run median per .lighthouserc.json. Reports land in .lighthouseci/.
+              # Assertions are `warn` level (see config), so the action never fails
+              # the job on a missed threshold — informational only.
+              #
+              # SHA pin: TODO(L3) — see .github/workflows/CLAUDE.md.
+              # Look up the 40-char SHA for v12 before merging this PR:
+              #   gh api repos/treosh/lighthouse-ci-action/git/refs/tags/v12 --jq '.object.sha'
+              # If that returns a tag-object SHA, dereference one more hop:
+              #   gh api repos/treosh/lighthouse-ci-action/git/tags/<tag-sha> --jq '.object.sha'
+              uses: treosh/lighthouse-ci-action@512cc908a55bfb0ad231facca52adf3d3a651df4 # v12
+              with:
+                  urls: ${{ needs.resolve.outputs.preview_url }}
+                  configPath: ./.lighthouserc.json
+                  # We upload manually below with the eval-<tool>-RUN-SHA naming
+                  # so the summary job can pattern-collect alongside the other tools.
+                  uploadArtifacts: false
+
+            - name: Parse median scores
+              id: lh
+              run: |
+                  set -euo pipefail
+                  shopt -s nullglob
+                  jsons=(.lighthouseci/lhr-*.json)
+                  if [ ${#jsons[@]} -eq 0 ]; then
+                      echo "::warning title=Lighthouse::No lhr-*.json reports found; emitting empty scores."
+                      { echo "perf="; echo "a11y="; echo "bp="; echo "seo="; } >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  # jq slurp: collect [score*100] across the runs, sort, pick middle.
+                  # For 3 runs (length=3, length/2|floor=1) this is the median.
+                  median() {
+                      local cat="$1"
+                      jq -s --arg cat "$cat" '
+                          [.[].categories[$cat].score * 100 | round]
+                          | sort
+                          | .[(length / 2) | floor]
+                      ' "${jsons[@]}"
+                  }
+                  {
+                      echo "perf=$(median performance)"
+                      echo "a11y=$(median accessibility)"
+                      echo "bp=$(median best-practices)"
+                      echo "seo=$(median seo)"
+                  } >> "$GITHUB_OUTPUT"
+
+            - name: Upload Lighthouse reports
+              # Per AGENTS.md traceability: <purpose>-<run-id>-<sha>.
+              uses: actions/upload-artifact@v7
+              with:
+                  name: eval-lighthouse-${{ github.run_id }}-${{ github.sha }}
+                  path: .lighthouseci/
+                  if-no-files-found: warn
+                  retention-days: 14
+
+    # ------------------------------------------------------------------
+    # Job 2: axe-core a11y scan
+    # ------------------------------------------------------------------
+    axe:
+        name: axe-core
+        needs: [resolve]
+        if: needs.resolve.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        outputs:
+            critical: ${{ steps.axe.outputs.critical }}
+            serious: ${{ steps.axe.outputs.serious }}
+            moderate: ${{ steps.axe.outputs.moderate }}
+            minor: ${{ steps.axe.outputs.minor }}
+        steps:
+            - name: Enable Corepack (provides pnpm)
+              run: |
+                  corepack enable
+                  corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+            - name: Setup Node
+              uses: actions/setup-node@v6
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+
+            - name: Run @axe-core/cli
+              id: axe
+              env:
+                  PREVIEW_URL: ${{ needs.resolve.outputs.preview_url }}
+              # `pnpm dlx` runs the binary without modifying package.json
+              # (see "Runtime trade-off" in docs/EVAL.md). `--exit` makes axe
+              # exit non-zero on any violation; we `|| true` so the report
+              # is captured but the job doesn't fail — informational only.
+              #
+              # axe-cli `--save <file>` writes the JSON violation list to disk.
+              run: |
+                  set -euo pipefail
+                  pnpm dlx @axe-core/cli "$PREVIEW_URL" --save axe.json --exit || true
+
+                  if [ ! -s axe.json ]; then
+                      echo "::warning title=axe-core::No axe.json output; emitting zero counts."
+                      { echo "critical=0"; echo "serious=0"; echo "moderate=0"; echo "minor=0"; } >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  # axe-cli writes either a single object or an array of per-URL
+                  # results. The `..` recursive descent + `select(.impact)` picks
+                  # up violations[].impact regardless of which shape it wrote.
+                  count() {
+                      local impact="$1"
+                      jq --arg i "$impact" '[.. | objects | select(.impact == $i)] | length' axe.json
+                  }
+                  {
+                      echo "critical=$(count critical)"
+                      echo "serious=$(count serious)"
+                      echo "moderate=$(count moderate)"
+                      echo "minor=$(count minor)"
+                  } >> "$GITHUB_OUTPUT"
+
+            - name: Upload axe report
+              uses: actions/upload-artifact@v7
+              with:
+                  name: eval-axe-${{ github.run_id }}-${{ github.sha }}
+                  path: axe.json
+                  if-no-files-found: warn
+                  retention-days: 14
+
+    # ------------------------------------------------------------------
+    # Job 3: link checker (lychee)
+    # ------------------------------------------------------------------
+    links:
+        name: Link check
+        needs: [resolve]
+        if: needs.resolve.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        outputs:
+            broken: ${{ steps.links.outputs.broken }}
+        steps:
+            - name: Run lychee
+              # `--max-redirects 5` — Vercel preview routes can include
+              # an auth-redirect chain; 5 is comfortably above that.
+              # `--no-progress` — strip \r-based progress bars from CI logs.
+              # `--format json` — machine-readable for parsing.
+              # `fail: false` — record broken links, don't fail the job.
+              #
+              # SHA pin: TODO(L3) — look up before merge:
+              #   gh api repos/lycheeverse/lychee-action/git/refs/tags/v2 --jq '.object.sha'
+              uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2
+              id: lychee
+              with:
+                  args: --max-redirects 5 --no-progress --format json ${{ needs.resolve.outputs.preview_url }}
+                  output: lychee.json
+                  fail: false
+
+            - name: Count broken links
+              id: links
+              run: |
+                  set -euo pipefail
+                  if [ ! -s lychee.json ]; then
+                      echo "::warning title=Links::No lychee.json output; emitting 0 broken."
+                      echo "broken=0" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  # lychee JSON has top-level `.errors` (count) and `.fail_map`
+                  # (per-URL failure detail). Prefer `.errors` when present.
+                  broken=$(jq '.errors // ([(.fail_map // {}) | to_entries[].value | length] | add) // 0' lychee.json)
+                  echo "broken=$broken" >> "$GITHUB_OUTPUT"
+
+            - name: Upload lychee report
+              uses: actions/upload-artifact@v7
+              with:
+                  name: eval-links-${{ github.run_id }}-${{ github.sha }}
+                  path: lychee.json
+                  if-no-files-found: warn
+                  retention-days: 14
+
+    # ------------------------------------------------------------------
+    # Job 4: type-coverage — needs the repo, not the preview.
+    # ------------------------------------------------------------------
+    types:
+        name: Type coverage
+        needs: [resolve]
+        if: needs.resolve.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        outputs:
+            coverage: ${{ steps.types.outputs.coverage }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Enable Corepack
+              run: |
+                  corepack enable
+                  corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+
+            - name: Setup Node
+              uses: actions/setup-node@v6
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+                  cache: "pnpm"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Run type-coverage
+              id: types
+              # type-coverage measures the ratio of explicitly typed vars/exprs
+              # vs `any`-leaking ones. `--strict` counts every `any` leak,
+              # including ones inherited from third-party types. `--detail`
+              # prints every untyped site to stdout for artifact review.
+              # The tool exits non-zero below the default 95% threshold; we
+              # capture the percentage regardless (informational only).
+              run: |
+                  set -uo pipefail
+                  pnpm dlx type-coverage --strict --detail > type-coverage.txt 2>&1 || true
+                  if [ ! -s type-coverage.txt ]; then
+                      echo "::warning title=type-coverage::No output captured."
+                      echo "coverage=" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  # type-coverage's last line of output looks like "97.12%" or
+                  # "12345 / 12700 97.12%". Take the last "X%" in the file.
+                  coverage=$(grep -oE '[0-9]+\.?[0-9]*%' type-coverage.txt | tail -n1 | tr -d '%')
+                  echo "coverage=${coverage:-}" >> "$GITHUB_OUTPUT"
+
+            - name: Upload type-coverage report
+              uses: actions/upload-artifact@v7
+              with:
+                  name: eval-types-${{ github.run_id }}-${{ github.sha }}
+                  path: type-coverage.txt
+                  if-no-files-found: warn
+                  retention-days: 14
+
+    # ------------------------------------------------------------------
+    # Job 5: summary — find-or-update scorecard comment + consolidated artifact.
+    # `always()` so a single tool job's failure doesn't suppress the comment;
+    # the corresponding cell will show ⚠️/❌ with the job's result annotated.
+    # ------------------------------------------------------------------
+    summary:
+        name: Eval summary
+        needs: [resolve, lighthouse, axe, links, types]
+        if: always() && needs.resolve.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: write
+        steps:
+            - name: Download all per-tool eval artifacts
+              # `pattern:` filters to just this run's eval artifacts.
+              # `merge-multiple: true` flattens them into one directory so the
+              # consolidated artifact has the same shape regardless of which
+              # tool produced which file.
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: eval-*-${{ github.run_id }}-${{ github.sha }}
+                  path: eval-reports/
+                  merge-multiple: true
+
+            - name: Upload consolidated eval artifact
+              # Per AGENTS.md traceability: the canonical artifact reviewers
+              # grab from the scorecard comment is `eval-<run-id>-<sha>`.
+              # 90-day retention because reviewers may revisit a flagged PR
+              # weeks later; per-tool intermediates above are 14d (cheaper).
+              uses: actions/upload-artifact@v7
+              with:
+                  name: eval-${{ github.run_id }}-${{ github.sha }}
+                  path: eval-reports/
+                  if-no-files-found: warn
+                  retention-days: 90
+
+            - name: Post or update scorecard comment
+              uses: actions/github-script@v9
+              env:
+                  PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+                  PREVIEW_URL: ${{ needs.resolve.outputs.preview_url }}
+                  LH_PERF: ${{ needs.lighthouse.outputs.perf }}
+                  LH_A11Y: ${{ needs.lighthouse.outputs.a11y }}
+                  LH_BP: ${{ needs.lighthouse.outputs.bp }}
+                  LH_SEO: ${{ needs.lighthouse.outputs.seo }}
+                  LH_RESULT: ${{ needs.lighthouse.result }}
+                  AXE_CRITICAL: ${{ needs.axe.outputs.critical }}
+                  AXE_SERIOUS: ${{ needs.axe.outputs.serious }}
+                  AXE_MODERATE: ${{ needs.axe.outputs.moderate }}
+                  AXE_MINOR: ${{ needs.axe.outputs.minor }}
+                  AXE_RESULT: ${{ needs.axe.result }}
+                  LINKS_BROKEN: ${{ needs.links.outputs.broken }}
+                  LINKS_RESULT: ${{ needs.links.result }}
+                  TYPES_COVERAGE: ${{ needs.types.outputs.coverage }}
+                  TYPES_RESULT: ${{ needs.types.result }}
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  ARTIFACT_NAME: eval-${{ github.run_id }}-${{ github.sha }}
+                  COMMIT_SHA: ${{ github.sha }}
+              with:
+                  script: |
+                      // HTML-comment marker is invisible in the rendered
+                      // comment but a stable needle for find-or-update.
+                      // Same pattern as agent-ci.yml / drift-check.yml.
+                      const MARKER = '<!-- eval:scorecard -->';
+                      const env = process.env;
+                      const { owner, repo } = context.repo;
+                      const issue_number = Number(env.PR_NUMBER);
+                      const short = (env.COMMIT_SHA || '').slice(0, 7);
+                      const evalDocUrl = `${context.serverUrl}/${owner}/${repo}/blob/main/docs/EVAL.md`;
+
+                      const num = (v) => {
+                          if (v === '' || v == null) return null;
+                          const n = Number(v);
+                          return Number.isNaN(n) ? null : n;
+                      };
+                      const cmp = (v, min) => {
+                          const n = num(v);
+                          if (n == null) return '⚠️';
+                          return n >= min ? '✅' : '❌';
+                      };
+                      const eq0 = (v) => {
+                          const n = num(v);
+                          if (n == null) return '⚠️';
+                          return n === 0 ? '✅' : '❌';
+                      };
+                      // Annotate the table cell when the underlying job didn't
+                      // succeed (e.g., axe install failed, lychee crashed).
+                      const note = (r) => r === 'success' ? '' : ` _(job ${r})_`;
+                      const cell = (v, suffix = '') => num(v) == null ? '—' : `${num(v)}${suffix}`;
+
+                      const body = [
+                          MARKER,
+                          `### Eval scorecard — ${short}`,
+                          '',
+                          `Preview: ${env.PREVIEW_URL}`,
+                          '',
+                          `| Signal | Score | Threshold | Result |`,
+                          `| --- | --- | --- | --- |`,
+                          `| Lighthouse Performance${note(env.LH_RESULT)} | ${cell(env.LH_PERF)} | ≥ 90 | ${cmp(env.LH_PERF, 90)} |`,
+                          `| Lighthouse Accessibility${note(env.LH_RESULT)} | ${cell(env.LH_A11Y)} | ≥ 95 | ${cmp(env.LH_A11Y, 95)} |`,
+                          `| Lighthouse Best Practices${note(env.LH_RESULT)} | ${cell(env.LH_BP)} | ≥ 90 | ${cmp(env.LH_BP, 90)} |`,
+                          `| Lighthouse SEO${note(env.LH_RESULT)} | ${cell(env.LH_SEO)} | ≥ 90 | ${cmp(env.LH_SEO, 90)} |`,
+                          `| axe critical${note(env.AXE_RESULT)} | ${cell(env.AXE_CRITICAL)} | 0 | ${eq0(env.AXE_CRITICAL)} |`,
+                          `| axe serious${note(env.AXE_RESULT)} | ${cell(env.AXE_SERIOUS)} | 0 | ${eq0(env.AXE_SERIOUS)} |`,
+                          `| Broken links${note(env.LINKS_RESULT)} | ${cell(env.LINKS_BROKEN)} | 0 | ${eq0(env.LINKS_BROKEN)} |`,
+                          `| Type coverage${note(env.TYPES_RESULT)} | ${cell(env.TYPES_COVERAGE, '%')} | ≥ 95% | ${cmp(env.TYPES_COVERAGE, 95)} |`,
+                          '',
+                          `axe (informational only): ${env.AXE_MODERATE || 0} moderate, ${env.AXE_MINOR || 0} minor.`,
+                          '',
+                          `- Run: ${env.RUN_URL}`,
+                          `- Artifact: \`${env.ARTIFACT_NAME}\` (download from the run's Summary tab — bundles \`lighthouseci/\`, \`axe.json\`, \`lychee.json\`, \`type-coverage.txt\`)`,
+                          `- Commit: \`${env.COMMIT_SHA}\``,
+                          '',
+                          `_Informational only — see [\`docs/EVAL.md\`](${evalDocUrl}) for thresholds and the soft-rollout posture._`,
+                      ].join('\n');
+
+                      const comments = await github.paginate(
+                          github.rest.issues.listComments,
+                          { owner, repo, issue_number, per_page: 100 },
+                      );
+                      const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+                      if (existing) {
+                          await github.rest.issues.updateComment({
+                              owner, repo, comment_id: existing.id, body,
+                          });
+                          core.info(`Updated comment ${existing.id}`);
+                      } else {
+                          await github.rest.issues.createComment({
+                              owner, repo, issue_number, body,
+                          });
+                          core.info('Created new eval scorecard comment');
+                      }
