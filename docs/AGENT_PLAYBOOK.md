@@ -12,6 +12,7 @@ Operational runbook for agents (Claude Code, Copilot, future custom agents) when
 - [Failure analysis](#failure-analysis) — what to write in the postmortem
 - [GitHub token semantics](#github-token-semantics) — why workflows sometimes don't trigger other workflows
 - [Hooks dependencies](#hooks-dependencies) — what the Claude hooks need installed locally, and how to read the audit log
+- [Memory](#memory) — where agent memory lives across a task's lifetime
 
 ---
 
@@ -253,3 +254,9 @@ tail -n 10000 .agent-scratch/audit.log > .agent-scratch/audit.log.tmp \
 ```
 
 The directory is per-machine — there's no shared log, no remote sync, no retention policy. It's a developer-local diagnostic tool, not an audit-grade compliance artifact. For the compliance side of things, GitHub's own audit log (org Settings → Audit log) covers the events that matter for the certification surface.
+
+---
+
+## Memory
+
+Agent memory lives in three tiers — short-term (the PR's `## Plan` block), long-term (`docs/agent-tasks/<task-id>/memory.md` and `decisions.md`), and external (workflow runs, uploaded artifacts, Vercel previews, GitHub issues). The pruning rule, the `<task-id>` naming convention, and the rationale for the split all live in [`MEMORY_POLICY.md`](MEMORY_POLICY.md). The `agent-artifact-check.yml` workflow (see [`WORKFLOWS.md`](WORKFLOWS.md)) enforces that agent-shaped PRs add or reference a `plan.md`.
