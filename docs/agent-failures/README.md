@@ -24,4 +24,4 @@ Dated postmortems of agent wrong-turns in this repo, plus the durable rule each 
 
 | File | Rule |
 | --- | --- |
-| <!-- add new entries here, one row per postmortem --> | |
+| [2026-05-22-update-scope-on-path-divergence.md](./2026-05-22-update-scope-on-path-divergence.md) | When implementing a step where the plan authorises a judgement call on a path or file shape, update the Scope block in the same commit as the deviation. |
