@@ -45,6 +45,8 @@ concurrency:
   # Group on PR number so multiple label/sync events don't race to queue
   # the same merge twice. For check_suite events, fall back to the head
   # sha (PRs are looked up dynamically in the job).
+  # For check_suite events the PR is resolved inside the job from the
+  # head sha, so we group on the head sha to deduplicate concurrent runs.
   group: automerge-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.ref }}
   cancel-in-progress: true
 
@@ -63,10 +65,10 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
-          # check_suite event exposes associated PRs as an array; we take
-          # the first (a check suite belongs to one head sha, which is
-          # usually associated with at most one open PR).
-          PR_NUMBER_CHECK_SUITE: ${{ github.event.check_suite.pull_requests[0].number }}
+          # For check_suite events we look up the PR via the head sha
+          # rather than indexing into event.check_suite.pull_requests[0]
+          # (which trips the Actions context linter on some clients).
+          CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -74,7 +76,15 @@ jobs:
 
           # ---- Resolve PR number for this run ----------------------------
           if [ "$EVENT_NAME" = "check_suite" ]; then
-            PR_NUMBER="${PR_NUMBER_CHECK_SUITE:-}"
+            # Look up the open PR for this head sha. A check suite belongs
+            # to one commit, which usually maps to at most one open PR.
+            if [ -z "${CHECK_SUITE_HEAD_SHA:-}" ]; then
+              echo "::notice title=Automerge skipped::check_suite event with no head sha."
+              exit 0
+            fi
+            PR_NUMBER=$(gh api \
+              "repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" \
+              --jq '[.[] | select(.state == "open")] | .[0].number // empty')
           else
             PR_NUMBER="${PR_NUMBER_EVENT:-}"
           fi
