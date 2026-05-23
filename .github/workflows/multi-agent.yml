@@ -109,14 +109,25 @@ jobs:
                   additional_permissions: |
                       actions: read
                   # Open the permission gate so the implementer can actually
-                  # write files in CI. Without this, the action defaults to
-                  # "ask user before each tool call" mode — in a non-
-                  # interactive runner the prompt resolves to deny. Run
-                  # 26327999337 hit 97 such denials over 40 turns and burned
-                  # ~$3 of credits with zero file edits. `acceptEdits` auto-
-                  # accepts Read/Write/Edit/MultiEdit/Glob/Grep without
-                  # changing the workflow job's `permissions:` block.
-                  claude_args: --permission-mode acceptEdits
+                  # write files AND run `pnpm test:*` in CI. The action
+                  # defaults to "ask user before each tool call" mode, which
+                  # in a non-interactive runner resolves to deny.
+                  # `acceptEdits` covers file edits; `--allowedTools …,Bash`
+                  # adds the shell access the implementer subagent file
+                  # asks for (running tests after changes). The implementer's
+                  # path scope is still enforced by its subagent prompt; the
+                  # workflow job's `permissions:` block still caps blast
+                  # radius. Run history:
+                  #   26327999337 — 97 Bash/Edit denials before the gate fix
+                  #   26328845319 — 11 Bash denials after acceptEdits-only
+                  claude_args: --permission-mode acceptEdits --allowedTools "Read,Write,Edit,MultiEdit,Glob,Grep,Bash"
+                  # Surface Claude's full output in CI logs while we
+                  # calibrate the multi-agent flow. Refusals + decision
+                  # rationale go to the run log instead of staying hidden
+                  # behind the action's default `show_full_output: false`.
+                  # Revert to false once the smoke test is consistently
+                  # passing.
+                  show_full_output: true
                   # The action passes `prompt:` to the Claude Code CLI, which
                   # auto-loads `.claude/agents/implementer.md` when instructed
                   # to use the named subagent. The issue body is read by
@@ -196,6 +207,9 @@ jobs:
                   # file edits at the runtime gate — defence-in-depth on top
                   # of the subagent file's `tools:` frontmatter exclusion.
                   claude_args: --permission-mode plan
+                  # Match the implementer's diagnostic visibility while we
+                  # calibrate. Revert when smoke test passes cleanly.
+                  show_full_output: true
                   prompt: |
                       Use the `a11y-reviewer` subagent (defined at .claude/agents/a11y-reviewer.md) to review pull request #${{ env.PR_NUMBER }} of repo ${{ github.repository }}.
 
