@@ -1,6 +1,6 @@
 import { describe, test } from "node:test"
 import assert from "node:assert/strict"
-import { calculateQuote } from "./quote.ts"
+import { calculateQuote } from "./quote"
 
 const DAY = "2024-06-15T12:00:00.000Z"
 const AT22 = "2024-06-15T22:00:00.000Z"
