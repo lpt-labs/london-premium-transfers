@@ -97,6 +97,7 @@ These are blocked by hooks, workflows, or CODEOWNERS. The agent should treat the
 ### Documentation invariants
 - **`docs/WORKFLOWS.md` is the visual source of truth for every workflow in `.github/workflows/`.** Any PR that adds, removes, or modifies a workflow file (or changes its triggers, permissions, or outcomes) MUST update `docs/WORKFLOWS.md` in the same PR — including the relevant diagram and the per-workflow table row. Same-PR-or-it-rots. Reviewers should flag workflow-touching PRs that don't update this doc.
 - Adding or removing a required status check in the `protect-main` ruleset also requires updating the "Required status checks" section of `docs/WORKFLOWS.md`.
+- **`docs/AUDIT.md` is the artifact-location reference.** Any PR that introduces a new *artifact type* (a new workflow, a new study guide, a new handoff format, a new postmortem schema, a new hook kind, a new MCP source, etc.) MUST update `docs/AUDIT.md` in the same PR to include the new artifact's location. Same-PR-or-it-rots — an artifact added without an `AUDIT.md` entry is invisible to anyone who didn't author it. Reviewers should flag PRs that introduce new artifact types without an `AUDIT.md` update.
 
 ---
 

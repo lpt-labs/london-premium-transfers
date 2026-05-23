@@ -1,0 +1,200 @@
+name: Path Guard
+
+# BLOCKING semantics: this workflow fails the run when an agent-shaped PR
+# touches a protected path without the `infra-change` label.
+#
+# IMPORTANT: this workflow is NOT yet wired as a required status check.
+# Promotion to required is a manual change in the `protect-main` ruleset
+# UI, performed AFTER this PR merges. See docs/WORKFLOWS.md
+# "Required status checks" for the activation path and the post-merge
+# verification step.
+#
+# Protected-paths list is a superset of AGENTS.md's L3 path list — the
+# canonical list lives inline in the run-step env block below so a
+# reviewer can audit the gate without leaving this file.
+
+on:
+  pull_request:
+    # `labeled`/`unlabeled` are included because adding/removing the
+    # `infra-change` label flips the gate decision; the workflow must
+    # re-run so the latest label state is what reports.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to re-check.
+        required: true
+        type: string
+
+# Least-privilege: read PR metadata + diff file list only. No write scopes.
+permissions:
+  contents: read
+  pull-requests: read
+
+# If a new commit or label change arrives mid-run, cancel the older run so
+# the gate decision is always written from the latest sha + label set.
+concurrency:
+  group: path-guard-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Protected paths require infra-change label
+    # Defensive trigger guard — protects against later additions of
+    # unrelated triggers (cron, etc.). Same pattern as plan-gate.yml.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check protected paths against label
+        # All PR-author-controlled values flow through env, never
+        # interpolated directly into shell — command-injection-safety
+        # rule per .github/workflows/CLAUDE.md.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+          PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          # ----------------------------------------------------------------
+          # Protected paths — superset of AGENTS.md's L3 list.
+          # Edit here to add/remove protected paths. Each entry is a bash
+          # glob matched with `case` (note: `*` matches `/`, so the
+          # `.github/workflows/*` shape catches nested files too).
+          # ----------------------------------------------------------------
+          PROTECTED_GLOBS: |
+            .github/workflows/*
+            .github/actions/*
+            .github/hooks/*
+            .github/agents/*
+            .github/aw/*
+            next.config.ts
+            package.json
+            pnpm-lock.yaml
+            tsconfig.json
+            tailwind.config.ts
+        run: |
+          set -euo pipefail
+
+          # ---- Resolve PR number for this run ----------------------------
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # pr_number flows into a `gh` API call. Validate it's purely
+            # numeric so an unvalidated input can't probe arbitrary paths.
+            if ! [[ "${PR_NUMBER_INPUT:-}" =~ ^[0-9]+$ ]]; then
+              echo "::error title=Bad input::workflow_dispatch input pr_number must be a positive integer (got '${PR_NUMBER_INPUT:-}')."
+              exit 1
+            fi
+            PR_NUMBER="$PR_NUMBER_INPUT"
+          else
+            PR_NUMBER="$PR_NUMBER_EVENT"
+          fi
+
+          # ---- Fetch PR metadata in one round-trip -----------------------
+          json=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json author,headRefName,labels)
+
+          author=$(jq -r '.author.login // ""' <<<"$json")
+          head_ref=$(jq -r '.headRefName // ""' <<<"$json")
+          labels=$(jq -r '[.labels[].name] | join(",")' <<<"$json")
+
+          # ---- Skip conditions -------------------------------------------
+          # Skip 1 — dependabot[bot]. Dependabot PRs routinely touch
+          # package.json / pnpm-lock.yaml; review handles those. Same
+          # exemption shape as plan-gate.yml + agent-artifact-check.yml;
+          # checked against author AND github.actor so an edit/label
+          # event on a dependabot PR (where actor may be a human) still
+          # exempts.
+          if [ "$author" = "dependabot[bot]" ] || [ "$ACTOR" = "dependabot[bot]" ]; then
+            echo "::notice title=Path Guard skipped::PR authored by dependabot[bot]; exempt (matches plan-gate.yml policy)."
+            exit 0
+          fi
+
+          # Skip 2 — non-agent-shaped PR. The guard only applies when the
+          # branch looks agent-shaped OR the PR carries the `agent-task`
+          # label. Detector is copied verbatim from
+          # agent-artifact-check.yml — keep in sync if either changes.
+          agent_branch=false
+          case "$head_ref" in
+            claude/*|agent/*) agent_branch=true ;;
+          esac
+
+          # Wrap with commas on both sides so we match whole label names
+          # (avoid e.g. "agent-task" matching "x-agent-task").
+          agent_label=false
+          if [[ ",${labels}," == *",agent-task,"* ]]; then
+            agent_label=true
+          fi
+
+          if [ "$agent_branch" = "false" ] && [ "$agent_label" = "false" ]; then
+            echo "::notice title=Path Guard skipped::Branch '$head_ref' is not agent-shaped (claude/** or agent/**) and the PR is not labeled 'agent-task'. Guard does not apply."
+            exit 0
+          fi
+
+          # ---- Collect changed files -------------------------------------
+          # `gh pr diff --name-only` returns one path per line, including
+          # added/modified/deleted. The guard treats any touched protected
+          # path the same way (an unlabeled deletion of a workflow is just
+          # as risky as an unlabeled edit).
+          changed_files=$(gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only || true)
+
+          if [ -z "$changed_files" ]; then
+            echo "::notice title=Path Guard::PR has no changed files. Nothing to guard."
+            exit 0
+          fi
+
+          # ---- Match changed files against protected globs ---------------
+          offending=""
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            while IFS= read -r glob; do
+              # Trim whitespace from the heredoc-sourced glob lines.
+              glob="${glob#"${glob%%[![:space:]]*}"}"
+              glob="${glob%"${glob##*[![:space:]]}"}"
+              [ -z "$glob" ] && continue
+              # shellcheck disable=SC2254  # intentional glob match on RHS
+              case "$file" in
+                $glob)
+                  offending+="${file}"$'\n'
+                  break
+                  ;;
+              esac
+            done <<<"$PROTECTED_GLOBS"
+          done <<<"$changed_files"
+
+          if [ -z "$offending" ]; then
+            echo "::notice title=Path Guard passed::No protected paths touched by this PR."
+            exit 0
+          fi
+
+          # ---- Check for the infra-change label --------------------------
+          has_infra_label=false
+          if [[ ",${labels}," == *",infra-change,"* ]]; then
+            has_infra_label=true
+          fi
+
+          if [ "$has_infra_label" = "true" ]; then
+            echo "::notice title=Path Guard passed::Protected paths touched, and PR carries the 'infra-change' label."
+            printf '%s' "$offending" | while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "  - $f"
+            done
+            exit 0
+          fi
+
+          # ---- Fail ------------------------------------------------------
+          echo "::error title=Path Guard failed::This PR touches protected paths but does not carry the 'infra-change' label."
+          echo ""
+          echo "Offending files:"
+          printf '%s' "$offending" | while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "  - $f"
+          done
+          echo ""
+          echo "To proceed:"
+          echo "  (a) Add the 'infra-change' label to this PR (L3 paths require it — see AGENTS.md 'Risk-based autonomy levels')."
+          echo "  (b) OR revert the changes to the protected paths listed above."
+          echo ""
+          echo "Protected-paths list lives in PROTECTED_GLOBS at the top of .github/workflows/path-guard.yml."
+          exit 1

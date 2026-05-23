@@ -1,0 +1,185 @@
+name: Least-Privilege Lint
+
+# Informational lint of workflow files for least-privilege patterns.
+# Soft rollout — never blocks merge; the job always exits 0.
+#
+# Checks per workflow file under .github/workflows/*.yml:
+#   1. Top-level `permissions:` block is declared (not relying on default).
+#   2. Top-level `permissions.contents` is NOT `write` (must be per-job).
+#   3. Any job with `permissions.contents: write` has an `if:` clause
+#      (so the elevated scope is gated on a branch/label/event, not
+#      unconditional).
+#
+# Findings are posted as a find-or-update PR comment with the marker
+# `<!-- least-privilege:summary -->` and as ::warning annotations on the
+# run. If the inline script grows past ~60 lines, extract to
+# scripts/lint-workflow-permissions.ts per docs/agent-tasks/16-*/plan.md.
+
+on:
+  pull_request:
+    # Only run when workflow files (or composite actions) change — no
+    # value running this on a docs-only or app-code PR.
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to comment on (optional; annotations always print).
+        required: false
+        type: string
+
+# Least-privilege baseline. The lint job re-declares what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: least-privilege-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint workflow permissions
+    if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Needed to post / update the summary comment on the PR.
+      pull-requests: write
+    outputs:
+      findings_md: ${{ steps.lint.outputs.findings_md }}
+      finding_count: ${{ steps.lint.outputs.finding_count }}
+    steps:
+      - name: Checkout
+        # First-party action — major-version tag per .github/workflows/CLAUDE.md.
+        uses: actions/checkout@v5
+
+      - name: Lint workflow files
+        id: lint
+        # yq is pre-installed on ubuntu-latest. No new deps.
+        # Findings are emitted as `file<TAB>finding` lines, then assembled
+        # into a Markdown table for the PR comment output.
+        run: |
+          set -euo pipefail
+
+          findings_tsv=$(mktemp)
+
+          for file in .github/workflows/*.yml; do
+            [ -e "$file" ] || continue
+
+            # Check 1 — top-level permissions: block exists.
+            top_perms=$(yq eval '.permissions // ""' "$file")
+            if [ -z "$top_perms" ] || [ "$top_perms" = "null" ]; then
+              printf '%s\t%s\n' "$file" "Missing top-level \`permissions:\` block (relies on repo/org default)." >> "$findings_tsv"
+              echo "::warning file=$file::Missing top-level permissions block."
+            fi
+
+            # Check 2 — top-level contents is not write.
+            top_contents=$(yq eval '.permissions.contents // ""' "$file")
+            if [ "$top_contents" = "write" ]; then
+              printf '%s\t%s\n' "$file" "Top-level \`permissions.contents: write\` — elevate per-job instead." >> "$findings_tsv"
+              echo "::warning file=$file::Top-level contents: write — should be per-job."
+            fi
+
+            # Check 3 — any job with contents: write has an if: clause.
+            # yq returns the job name for every job where contents == write
+            # AND `if` is absent/empty.
+            ungated=$(yq eval -r '.jobs | to_entries[] | select(.value.permissions.contents == "write") | select((.value.if // "") == "") | .key' "$file")
+            if [ -n "$ungated" ]; then
+              while IFS= read -r job; do
+                [ -z "$job" ] && continue
+                printf '%s\t%s\n' "$file" "Job \`$job\` has \`contents: write\` without an \`if:\` clause (ungated elevated scope)." >> "$findings_tsv"
+                echo "::warning file=$file::Job '$job' has contents: write without an if: gate."
+              done <<<"$ungated"
+            fi
+          done
+
+          count=$(wc -l < "$findings_tsv" | tr -d ' ')
+
+          if [ "$count" -eq 0 ]; then
+            findings_md="✅ All workflows declare explicit, least-privilege permissions."
+          else
+            findings_md=$'| File | Finding |\n| --- | --- |\n'
+            while IFS=$'\t' read -r f msg; do
+              findings_md+="| \`$f\` | $msg |"$'\n'
+            done < "$findings_tsv"
+          fi
+
+          {
+            echo "finding_count=$count"
+            echo "findings_md<<LP_EOF"
+            echo "$findings_md"
+            echo "LP_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice title=Least-Privilege Lint::$count finding(s) across $(ls .github/workflows/*.yml 2>/dev/null | wc -l | tr -d ' ') workflow file(s)."
+
+      - name: Post or update PR comment
+        # Only post on pull_request events, or workflow_dispatch when a
+        # pr_number was supplied. Otherwise findings live in the run log.
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.pr_number != '')
+        uses: actions/github-script@v9
+        env:
+          FINDINGS_MD: ${{ steps.lint.outputs.findings_md }}
+          FINDING_COUNT: ${{ steps.lint.outputs.finding_count }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+          PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        with:
+          script: |
+            // Stable HTML-comment marker — invisible in rendered Markdown
+            // but a reliable needle for find-or-update.
+            const MARKER = '<!-- least-privilege:summary -->';
+            const {
+              FINDINGS_MD, FINDING_COUNT,
+              PR_NUMBER_EVENT, PR_NUMBER_INPUT, EVENT_NAME,
+              RUN_URL, COMMIT_SHA,
+            } = process.env;
+
+            const issue_number = Number(
+              EVENT_NAME === 'workflow_dispatch' ? PR_NUMBER_INPUT : PR_NUMBER_EVENT
+            );
+            const { owner, repo } = context.repo;
+            const count = Number(FINDING_COUNT);
+            const short = COMMIT_SHA.slice(0, 7);
+
+            const header = count > 0
+              ? `⚠️ **${count} least-privilege finding(s):**`
+              : '';
+
+            const body = [
+              MARKER,
+              `### Least-Privilege Lint — ${short}`,
+              '',
+              header,
+              header ? '' : null,
+              FINDINGS_MD,
+              '',
+              `- Run: ${RUN_URL}`,
+              `- Commit: \`${COMMIT_SHA}\``,
+              '',
+              '_Informational only — not a blocking check._',
+            ].filter(line => line !== null).join('\n');
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 },
+            );
+            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+              core.info(`Updated comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body,
+              });
+              core.info('Created new least-privilege comment');
+            }

@@ -16,12 +16,16 @@ flowchart LR
     DEPENDABOT([Dependabot push])
     VERCEL_DEPLOY_SUCCESS([Vercel preview live])
     LABEL_MULTI_AGENT([Issue labelled multi-agent])
+    CHECK_SUITE_DONE([check_suite completed])
 
     %% Workflows
     PLAN_GATE[plan-gate.yml]
     ARTIFACT_CHECK[agent-artifact-check.yml]
     DRIFT[drift-check.yml]
     CONFLICT[conflict-detect.yml]
+    PATH_GUARD[path-guard.yml]
+    LEAST_PRIV[least-privilege.yml]
+    AUTOMERGE[automerge.yml]
     EVAL[eval.yml]
     AGENT_CI[agent-ci.yml]
     CLAUDE[claude.yml]
@@ -34,6 +38,7 @@ flowchart LR
 
     %% Outputs
     REQUIRED_CHECK{{Required status check}}
+    REQUIRED_CHECK_PATHGUARD{{Required: path-guard<br/>post-merge promotion}}
     INFO_CHECK[Informational status check]
     PR_COMMENT[/PR comment/]
     LABEL_DRIFT[/agent-drift label/]
@@ -45,6 +50,7 @@ flowchart LR
     VERCEL_PREVIEW[/Vercel preview URL/]
     PROD_DEPLOY[/Production deploy<br/>via env gate/]
     REVERT_PR[/Revert PR/]
+    MERGE[/Auto-merge queued<br/>fires when required checks pass/]
 
     %% Edges
     PR_OPEN --> PLAN_GATE --> REQUIRED_CHECK
@@ -66,6 +72,20 @@ flowchart LR
     DEPENDABOT -.exempt.-> CONFLICT
     CONFLICT --> PR_COMMENT
     CONFLICT --> LABEL_CONFLICT
+
+    PR_OPEN -->|agent-shaped PR| PATH_GUARD
+    DEPENDABOT -.exempt.-> PATH_GUARD
+    PATH_GUARD -->|today| INFO_CHECK
+    PATH_GUARD -.->|after post-merge<br/>ruleset UI promotion| REQUIRED_CHECK_PATHGUARD
+
+    PR_OPEN -->|workflow files changed| LEAST_PRIV
+    DEPENDABOT -.exempt.-> LEAST_PRIV
+    LEAST_PRIV --> PR_COMMENT
+
+    PR_OPEN -->|labels: automerge-ok + agent-task| AUTOMERGE
+    CHECK_SUITE_DONE --> AUTOMERGE
+    DEPENDABOT -.exempt.-> AUTOMERGE
+    AUTOMERGE --> MERGE
 
     VERCEL_DEPLOY_SUCCESS --> EVAL
     DISPATCH --> EVAL
@@ -100,10 +120,10 @@ flowchart LR
     classDef output fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef gate fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
 
-    class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT,VERCEL_DEPLOY_SUCCESS,LABEL_MULTI_AGENT trigger
-    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,CONFLICT,EVAL,AGENT_CI,CLAUDE,MULTI_AGENT,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
-    class PR_COMMENT,LABEL_DRIFT,LABEL_CONFLICT,ARTIFACT,ARTIFACT_EVAL,BOT_PR,PR_REVIEW_COMMENT,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
-    class REQUIRED_CHECK gate
+    class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT,VERCEL_DEPLOY_SUCCESS,LABEL_MULTI_AGENT,CHECK_SUITE_DONE trigger
+    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,CONFLICT,PATH_GUARD,LEAST_PRIV,AUTOMERGE,EVAL,AGENT_CI,CLAUDE,MULTI_AGENT,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
+    class PR_COMMENT,LABEL_DRIFT,LABEL_CONFLICT,ARTIFACT,ARTIFACT_EVAL,BOT_PR,PR_REVIEW_COMMENT,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK,MERGE output
+    class REQUIRED_CHECK,REQUIRED_CHECK_PATHGUARD gate
 ```
 
 ## A typical PR's lifecycle
@@ -118,6 +138,7 @@ sequenceDiagram
     participant Artifact as agent-artifact-check.yml
     participant Drift as drift-check.yml
     participant Conflict as conflict-detect.yml
+    participant PathGuard as path-guard.yml
     participant CI as agent-ci.yml
     participant Review as claude-code-review.yml
     participant CodeQL as CodeQL
@@ -138,6 +159,9 @@ sequenceDiagram
     and Conflict check runs
         GH->>Conflict: trigger
         Conflict-->>GH: info comment (+ `agent-conflict` label if files overlap with another open PR)
+    and Path guard runs (agent-shaped PRs only)
+        GH->>PathGuard: trigger
+        PathGuard-->>GH: passes when no protected paths touched OR infra-change label present, fails the run otherwise (promotion to required status check is a post-merge UI step in the protect-main ruleset)
     and CI runs
         GH->>CI: trigger
         CI->>CI: lint, typecheck, build
@@ -195,6 +219,9 @@ sequenceDiagram
 | `agent-artifact-check.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `edited`, `labeled`, `unlabeled` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]` and for PRs that are neither on a `claude/**`/`agent/**` branch nor labeled `agent-task`. | `contents: read`, `pull-requests: read` | Informational status check verifying an agent-shaped PR adds or references a `docs/agent-tasks/<task-id>/plan.md` file (see `docs/MEMORY_POLICY.md`) | Informational on day one — promote to required only after a few green runs on real agent PRs |
 | `drift-check.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `edited` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]`. | Read-only `check` job: `contents: read`, `pull-requests: read`. Write-elevated `report` job: `contents: read`, `pull-requests: write`, `issues: write` (the labels API lives under issues). | Find-or-update PR comment listing files touched outside the plan's `- **Scope (paths/files):**` block; toggles the `agent-drift` label. Always exits 0. | Informational on day one — never fails the run; promote to required only after a few real PRs show the signal is reliable |
 | `conflict-detect.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review` + `workflow_dispatch` (manual re-check with `pr_number` input). Skips for `dependabot[bot]`. Concurrency group keyed on PR number with `cancel-in-progress: true`; `timeout-minutes: 5`. | Read-only `check` job: `contents: read`, `pull-requests: read`. Write-elevated `report` job: `contents: read`, `pull-requests: write`, `issues: write`. | Find-or-update PR comment with marker `<!-- conflict-detect:summary -->` listing other open PRs that touch shared files; toggles the `agent-conflict` label. Always exits 0. | Informational on day one — never fails the run; promote to required only after the signal proves reliable on a few real PRs |
+| `path-guard.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `labeled`, `unlabeled` (label events flip the gate decision) + `workflow_dispatch` with `pr_number` input. Skips for `dependabot[bot]` and for non-agent-shaped PRs (branch not `claude/**` or `agent/**` AND no `agent-task` label — detector copied from `agent-artifact-check.yml`). Concurrency-keyed by PR number with `cancel-in-progress: true`. | `contents: read`, `pull-requests: read` (no write scopes). | Status check that **fails the run** when an agent-shaped PR touches a path in the protected-globs list (`.github/workflows/**`, `.github/actions/**`, `.github/hooks/**`, `.github/agents/**`, `.github/aw/**`, `next.config.ts`, `package.json`, `pnpm-lock.yaml`, `tsconfig.json`, `tailwind.config.ts`) without carrying the `infra-change` label. Failure message names every offending path. | Informational on day one (workflow added but not yet wired in the ruleset). **Promoted to required as a manual UI step in the `protect-main` ruleset AFTER this PR merges** — see "Required status checks" below. |
+| `least-privilege.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review` filtered to `paths: ['.github/workflows/**', '.github/actions/**']` + `workflow_dispatch` (optional `pr_number` for comment target). Skips for `dependabot[bot]`. Concurrency-keyed by PR number with `cancel-in-progress: true`. | Workflow baseline `contents: read`. Lint job elevates to `contents: read`, `pull-requests: write` (per-job — needed to post the summary comment). | Lints every `.github/workflows/*.yml` for: (1) top-level `permissions:` exists; (2) top-level `permissions.contents` is not `write`; (3) any job with `contents: write` has an `if:` gate. Findings posted as `::warning` annotations and as a find-or-update PR comment with marker `<!-- least-privilege:summary -->`. Always exits 0 (soft rollout). | Informational — never blocks merge. Escalation trigger documented in [`docs/agent-tasks/16-governance-capstone/plan.md`](agent-tasks/16-governance-capstone/plan.md): if the inline script grows past ~60 lines, extract to `scripts/lint-workflow-permissions.ts` with `node:test` cases. |
+| `automerge.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review`, `labeled` + `check_suite: types: [completed]` (PR is resolved from `head_sha` via `gh api`). Skips for `dependabot[bot]`, closed/draft PRs, and PRs missing either of the required labels. Concurrency-keyed by PR number / head sha with `cancel-in-progress: true`. | Workflow baseline `contents: read`. `automerge` job elevates to `contents: write`, `pull-requests: write` (per-job — required by `gh pr merge --auto`). | Calls `gh pr merge "$PR_NUMBER" --auto --squash --delete-branch` **only when** the PR carries both `automerge-ok` AND `agent-task` labels AND every changed file matches `docs/**` OR is a top-level `*.md` other than `README.md` / `CLAUDE.md` / `AGENTS.md`. `--auto` queues the merge; GitHub fires it once required status checks pass under branch protection. Non-eligible PRs exit 0 silently with a `::notice`. | n/a (not a status check) — eligibility is strict and opt-in; the queued merge still respects every required status check in branch protection, so this workflow cannot bypass the gate. |
 | `eval.yml` | `deployment_status` events where `deployment.environment == 'Preview'` and `state == 'success'` (i.e. the Vercel preview is live), plus `workflow_dispatch` with a `pr_number` input for manual re-runs / backfills. Skips for Dependabot PRs (author lookup), for production deployment_status events, and for non-success states. | Workflow baseline `contents: read`. `resolve` job adds `pull-requests: read` for PR/deployment lookups. `summary` job elevates to `pull-requests: write` only — comment-write scope is per-job, not workflow-wide. | Find-or-update PR comment with marker `<!-- eval:scorecard -->` containing the four-tool scorecard table (Lighthouse, axe-core, lychee, type-coverage). Consolidated artifact `eval-<run-id>-<sha>` (90-day retention) bundling `lighthouseci/`, `axe.json`, `lychee.json`, `type-coverage.txt`; per-tool intermediates `eval-<tool>-<run-id>-<sha>` (14-day retention) re-uploaded into the consolidated artifact by the summary job. Always exits 0. | Informational — thresholds, the qual fidelity checklist, and the promotion path documented in [`EVAL.md`](EVAL.md) |
 | `agent-ci.yml` | PR `opened` / `synchronize` on `agent/**` and `feat/**` branches | `contents: read`, `pull-requests: write` | Lint, typecheck, build status checks; PR comment summary; uploaded artifact named `logs-<run-id>-<sha>` | Informational (could be made required via ruleset) |
 | `claude.yml` | Agent mention (currently the trigger string is `@claude`) in issue body/title, issue comment, PR comment, or PR review | `contents: write`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read` | Agent runs the requested task in a runner; commits to a branch; opens/updates a PR; posts a status comment on the originating issue/PR | n/a (not a status check) |
@@ -250,12 +277,17 @@ Configured in the `protect-main` ruleset at the org level:
 
 - ✅ `plan-gate / Plan present and filled`
 
+**Pending UI promotion** (workflow exists in the repo but is NOT yet wired as a required check):
+
+- `path-guard / Protected paths require infra-change label` — promoted to required as a **manual UI change in the `protect-main` ruleset AFTER PR 16 merges**. Until promoted, a failing `path-guard` run does not block merge; reviewers should still treat a failure as a hard veto. When promoting, enable the ruleset's "Skip if not run" option so PRs from `dependabot[bot]` (which the workflow skips for) don't stall waiting for a check that never reports — see the rationale in `docs/agent-tasks/16-governance-capstone/plan.md` Risks.
+
 Informational checks (run on every PR but don't block merge):
 
 - `agent-ci / lint`, `agent-ci / typecheck`, `agent-ci / build`, `agent-ci / PR summary`
 - `Claude Code Review / claude-review`
 - `Code scanning results / CodeQL`
 - `CodeQL / Analyze (actions)`, `CodeQL / Analyze (javascript-typescript)`
+- `least-privilege / Lint workflow permissions` (no plan to promote — soft lint of workflow files)
 
 Promoting any informational check to required is a UI change in the ruleset, not a code change.
 
@@ -271,3 +303,11 @@ Promoting any informational check to required is a UI change in the ruleset, not
 This is part of the L3 hygiene from `.github/instructions/workflows.instructions.md`. The PR-template's "Scope" field should include `docs/WORKFLOWS.md` whenever workflows change.
 
 If the diagrams drift far from reality, that's a sign the doc isn't being maintained — at that point, prefer regenerating both diagrams from the actual workflow files rather than patching the stale version.
+
+## Documentation invariants — audit map
+
+**Any PR that introduces a new artifact type — a new workflow, a new study guide, a new handoff format, a new postmortem schema, a new hook kind, a new MCP source, anything that produces output a future reader will need to locate — MUST update [`docs/AUDIT.md`](AUDIT.md) in the same PR.**
+
+Same-PR-or-it-rots: an artifact added without an `AUDIT.md` entry is invisible to anyone who didn't author it. Reviewers should flag PRs that introduce new artifact types without an `AUDIT.md` update, the same way they flag workflow PRs that don't touch this file.
+
+Mirrored in [`AGENTS.md`](../AGENTS.md) "Documentation invariants" so the rule applies regardless of which agent is editing.

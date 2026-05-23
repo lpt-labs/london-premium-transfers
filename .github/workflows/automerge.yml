@@ -1,0 +1,191 @@
+name: Automerge (docs-only agent PRs)
+
+# Opt-in automerge for docs-only agent PRs.
+#
+# Eligibility (ALL must hold):
+#   - PR carries BOTH labels: `automerge-ok` AND `agent-task`.
+#   - Every changed file matches:
+#       docs/**                     (the entire docs tree)
+#       OR a top-level *.md         EXCEPT README.md, CLAUDE.md, AGENTS.md
+#         (these three carry repo-wide policy and typically accompany
+#         substantive changes — never auto-merge them).
+#   - PR author is not dependabot[bot].
+#
+# When eligible: `gh pr merge --auto --squash --delete-branch`. The `--auto`
+# flag queues the merge; GitHub performs it once all required status checks
+# pass and branch-protection rules are satisfied. This workflow does NOT
+# bypass branch protection.
+#
+# Failure-mode notes (also recorded in docs/AUDIT.md):
+#   - GITHUB_TOKEN-triggered merges do NOT cascade to further workflow runs
+#     on `main`. For docs-only changes this is fine (no deploys needed for
+#     docs/**). If future eligibility loosens to non-docs paths, revisit.
+#   - Removing either label disables automerge for that PR. The author can
+#     also run `gh pr merge --disable-auto` if they need to halt a queued
+#     merge before checks complete.
+
+on:
+  pull_request:
+    # `labeled` is what most often flips eligibility (the author opts in
+    # by adding `automerge-ok`). Other types catch the case where labels
+    # were applied before the PR was ready.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    branches: [main]
+  # Belt-and-braces: re-evaluate when a check suite completes, in case
+  # the PR was labeled before any checks ran. `--auto` already handles
+  # the wait-for-checks case, so this is mostly defensive.
+  check_suite:
+    types: [completed]
+
+# Least-privilege baseline. The merge job re-declares the writes it needs.
+permissions:
+  contents: read
+
+concurrency:
+  # Group on PR number so multiple label/sync events don't race to queue
+  # the same merge twice. For check_suite events, fall back to the head
+  # sha (PRs are looked up dynamically in the job).
+  # For check_suite events the PR is resolved inside the job from the
+  # head sha, so we group on the head sha to deduplicate concurrent runs.
+  group: automerge-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  automerge:
+    name: Queue automerge if eligible
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # Elevated only on this job — required by `gh pr merge --auto`.
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check eligibility and queue automerge
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+          # For check_suite events we look up the PR via the head sha
+          # rather than indexing into event.check_suite.pull_requests[0]
+          # (which trips the Actions context linter on some clients).
+          CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # ---- Resolve PR number for this run ----------------------------
+          if [ "$EVENT_NAME" = "check_suite" ]; then
+            # Look up the open PR for this head sha. A check suite belongs
+            # to one commit, which usually maps to at most one open PR.
+            if [ -z "${CHECK_SUITE_HEAD_SHA:-}" ]; then
+              echo "::notice title=Automerge skipped::check_suite event with no head sha."
+              exit 0
+            fi
+            PR_NUMBER=$(gh api \
+              "repos/${REPO}/commits/${CHECK_SUITE_HEAD_SHA}/pulls" \
+              --jq '[.[] | select(.state == "open")] | .[0].number // empty')
+          else
+            PR_NUMBER="${PR_NUMBER_EVENT:-}"
+          fi
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::notice title=Automerge skipped::No PR associated with this event (event=$EVENT_NAME)."
+            exit 0
+          fi
+
+          # ---- Fetch PR metadata in one round-trip -----------------------
+          json=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json author,state,isDraft,labels,files,autoMergeRequest)
+
+          author=$(jq -r '.author.login // ""' <<<"$json")
+          state=$(jq -r '.state // ""' <<<"$json")
+          is_draft=$(jq -r '.isDraft // false' <<<"$json")
+          labels=$(jq -r '[.labels[].name] | join(",")' <<<"$json")
+          files=$(jq -r '.files[].path' <<<"$json")
+          auto_already=$(jq -r '.autoMergeRequest // empty' <<<"$json")
+
+          # ---- Cheap exits -----------------------------------------------
+          if [ "$author" = "dependabot[bot]" ]; then
+            echo "::notice title=Automerge skipped::PR authored by dependabot[bot]."
+            exit 0
+          fi
+
+          if [ "$state" != "OPEN" ]; then
+            echo "::notice title=Automerge skipped::PR #$PR_NUMBER is $state."
+            exit 0
+          fi
+
+          if [ "$is_draft" = "true" ]; then
+            echo "::notice title=Automerge skipped::PR #$PR_NUMBER is a draft."
+            exit 0
+          fi
+
+          # ---- Label gate ------------------------------------------------
+          # Comma-wrap to match whole label names (avoid substring matches
+          # like "automerge-ok-later"). Same pattern as path-guard.yml and
+          # agent-artifact-check.yml.
+          if [[ ",${labels}," != *",automerge-ok,"* ]]; then
+            echo "::notice title=Automerge skipped::PR #$PR_NUMBER missing 'automerge-ok' label."
+            exit 0
+          fi
+          if [[ ",${labels}," != *",agent-task,"* ]]; then
+            echo "::notice title=Automerge skipped::PR #$PR_NUMBER missing 'agent-task' label."
+            exit 0
+          fi
+
+          # ---- Path gate -------------------------------------------------
+          # Every changed file must match docs/** OR a top-level *.md
+          # other than README.md / CLAUDE.md / AGENTS.md.
+          if [ -z "$files" ]; then
+            echo "::notice title=Automerge skipped::PR #$PR_NUMBER has no changed files."
+            exit 0
+          fi
+
+          ineligible=""
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            ok=false
+            # docs/**
+            case "$file" in
+              docs/*) ok=true ;;
+            esac
+            # Top-level *.md, except the three policy files.
+            if [ "$ok" = "false" ]; then
+              case "$file" in
+                README.md|CLAUDE.md|AGENTS.md) ok=false ;;
+                *.md)
+                  # Reject anything with a slash (top-level only).
+                  case "$file" in
+                    */*) ok=false ;;
+                    *)   ok=true ;;
+                  esac
+                  ;;
+              esac
+            fi
+            if [ "$ok" = "false" ]; then
+              ineligible+="${file}"$'\n'
+            fi
+          done <<<"$files"
+
+          if [ -n "$ineligible" ]; then
+            echo "::notice title=Automerge skipped::PR #$PR_NUMBER has non-docs files:"
+            printf '%s' "$ineligible" | while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              echo "  - $f"
+            done
+            exit 0
+          fi
+
+          # ---- Idempotency ----------------------------------------------
+          if [ -n "$auto_already" ]; then
+            echo "::notice title=Automerge::PR #$PR_NUMBER already has auto-merge enabled. Nothing to do."
+            exit 0
+          fi
+
+          # ---- Queue the merge ------------------------------------------
+          # `--auto` queues; the merge happens after required checks pass
+          # under branch protection. `--squash` matches the repo's default
+          # merge style. `--delete-branch` keeps refs tidy.
+          echo "::notice title=Automerge::Queueing auto-merge for PR #$PR_NUMBER (squash, delete branch)."
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash --delete-branch
