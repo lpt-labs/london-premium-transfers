@@ -222,10 +222,19 @@ jobs:
                   PR_NUMBER: ${{ needs.implementer.outputs.pr_number }}
               with:
                   claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-                  # Reviewer is read-only by design. Plan mode prevents any
-                  # file edits at the runtime gate — defence-in-depth on top
-                  # of the subagent file's `tools:` frontmatter exclusion.
-                  claude_args: --permission-mode plan
+                  # Reviewer is read-only by design — but `--permission-mode
+                  # plan` was the wrong way to express that. In Claude Code
+                  # semantics, `plan` means "stage a plan, await user approval
+                  # to execute" — in non-interactive CI the reviewer wrote a
+                  # meta-plan and exited success without ever reading the
+                  # diff or posting a comment (run 26331201023 burned $0.21
+                  # on a planning meta-output). Read-only constraint is now
+                  # enforced via the `allowedTools` whitelist (excludes
+                  # Write/Edit/MultiEdit) plus the subagent file's `tools:`
+                  # frontmatter plus the job's `permissions:` block. Bash is
+                  # included for the `gh` CLI calls the reviewer needs to
+                  # fetch the PR and post the comment.
+                  claude_args: --permission-mode acceptEdits --allowedTools "Read,Grep,Glob,Bash"
                   # Match the implementer's diagnostic visibility while we
                   # calibrate. Revert when smoke test passes cleanly.
                   show_full_output: true
