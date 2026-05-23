@@ -34,16 +34,17 @@
      - **Trigger**: `issues: types: [labeled]`, with `if: github.event.label.name == 'multi-agent'`. Plus `workflow_dispatch` with `issue_number` input for manual reruns.
      - **Permissions baseline**: `contents: read`; per-job elevations.
      - **Concurrency**: group on issue number; cancel in-progress.
+     - **Schema/spec facts (verified 2026-05-23 against `action.yml@v1`):** the action is `anthropics/claude-code-action` (not `anthropic-ai/...`); v1 tag resolves to commit SHA `787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251`; the action's prompt input is `prompt:` (there is no `system_prompt:` input); auth is via `claude_code_oauth_token:` using the existing `CLAUDE_CODE_OAUTH_TOKEN` secret already in `claude.yml` (`ANTHROPIC_API_KEY` is not configured on this repo); documented step outputs are `execution_file`, `branch_name`, `github_token`, `structured_output`, `session_id` — **no `pr_number`**, so the caller captures it via `gh pr list --head`; branch naming is controlled via the action's `branch_prefix:` + `branch_name_template:` inputs, not by the caller pre-creating the branch.
      - **Job 1 — implementer**:
-       - `permissions: { contents: write, pull-requests: write, issues: write, id-token: write }`.
-       - Checkout main; setup Node 24 + pnpm (Corepack pattern from `agent-ci.yml`).
-       - Invoke `anthropic-ai/claude-code-action` (SHA-pinned + version comment) with `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}` and a directed `system_prompt:` that loads `.claude/agents/implementer.md` and references the labelled issue's body. Target branch `multi-agent/<issue-number>`.
-       - Output `pr_number` via a `gh pr list --head "multi-agent/<issue-number>" --json number --jq '.[0].number'` step; brief retry-with-sleep loop (~30 s total) to accommodate push propagation.
+       - `permissions: { contents: write, pull-requests: write, issues: write, id-token: write, actions: read }` (`actions: read` so Claude can read prior CI results).
+       - Checkout main; setup Node (the action bundles Bun internally; existing `claude.yml` does not install pnpm and the implementer can `corepack enable` from Bash if a task needs it).
+       - Invoke `anthropics/claude-code-action` pinned to SHA `787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251` with a trailing `# v1 (2026-05-23)` comment; pass `claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`; force the branch shape via `branch_prefix: "multi-agent/"` + `branch_name_template: "{{prefix}}{{entityNumber}}"` so the branch is deterministically `multi-agent/<issue-number>`; pass a directed `prompt:` instructing Claude to use the `implementer` subagent (the Claude Code CLI auto-dispatches to `.claude/agents/<name>.md` when so instructed) and naming the labelled issue.
+       - Output `pr_number` via a `gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number'` step (consuming the action's `branch_name` output through `env:`); brief retry-with-sleep loop (~30 s total) to accommodate push propagation.
      - **Job 2 — a11y-reviewer**:
        - `needs: [implementer]`, `if: needs.implementer.outputs.pr_number != ''`.
        - `permissions: { contents: read, pull-requests: write, issues: read }`.
-       - Checkout the implementer's branch; setup Node.
-       - Invoke `anthropic-ai/claude-code-action` again with a directed `system_prompt:` that loads `.claude/agents/a11y-reviewer.md` and points it at PR `${{ needs.implementer.outputs.pr_number }}`. Reviewer posts a single review comment using a marker `<!-- multi-agent:a11y-review -->`; does NOT modify files.
+       - Checkout the implementer's branch (ref taken from `needs.implementer.outputs.branch_name`); setup Node.
+       - Invoke `anthropics/claude-code-action` (same SHA-pinned ref, same auth secret) with a directed `prompt:` that instructs Claude to use the `a11y-reviewer` subagent and points it at PR `${{ needs.implementer.outputs.pr_number }}`. Reviewer posts a single review comment using a marker `<!-- multi-agent:a11y-review -->`; does NOT modify files.
      - **Job 3 — handoff log**:
        - `needs: [implementer, a11y-reviewer]`, `if: always() && needs.implementer.outputs.pr_number != ''`.
        - Composes the handoff log file under `docs/handoffs/<date>-<issue-number>-<slug>.md` and commits it to the same `multi-agent/<issue-number>` branch (so it's part of the implementer's PR — single audit trail).
@@ -65,8 +66,7 @@
   - [ ] `docs/WORKFLOWS.md` flowchart + sequence + table all updated; dormant Copilot agent files appear in the dormant subsection.
 
 - **Risks + mitigations:**
-  - *Risk:* `anthropic-ai/claude-code-action`'s exact output shape (does it emit `pr_number` as a step output? where does the URL surface?) is undocumented territory for us — guessing wrong wastes Anthropic credits on every run.
-    *Mitigation:* Implementer pauses at commit 7 to read the action's current README and pick the canonical output approach (step output if it exists; `gh pr list --head` fallback otherwise). Document the chosen approach in a comment block in the workflow file.
+  - *Risk:* ~~`anthropic-ai/claude-code-action`'s exact output shape is undocumented territory.~~ **Resolved 2026-05-23.** Verified against `action.yml@v1`: the action is `anthropics/claude-code-action` (not `anthropic-ai/...`); documented outputs are `execution_file`, `branch_name`, `github_token`, `structured_output`, `session_id` — no `pr_number`. The workflow captures the PR number via `gh pr list --head "$BRANCH_NAME"` (consuming the action's `branch_name` output) with a bounded retry loop; the header comment block in `multi-agent.yml` records the verification date.
   - *Risk:* Cross-job handoff timing — pushes from the implementer job may not be visible to `gh pr list` immediately.
     *Mitigation:* Brief retry-with-sleep loop bounded at ~30 s in the PR-number-capture step. If the loop exhausts, emit `::error` and exit — the reviewer job then short-circuits via the `needs.implementer.outputs.pr_number != ''` guard.
   - *Risk:* Anthropic credit burn — every multi-agent run costs real money; runaway label loops could rack up cost.

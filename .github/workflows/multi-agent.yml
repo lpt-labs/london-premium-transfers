@@ -1,0 +1,310 @@
+name: Multi-agent
+
+# Two Claude subagents wired in sequence on a labelled issue:
+#   1. implementer  — opens a PR on `multi-agent/<issue-number>`.
+#   2. a11y-reviewer — posts a find-or-update review comment on that PR.
+#   3. handoff-log   — writes docs/handoffs/<date>-<issue>-<slug>.md to the
+#                      same branch (so the audit trail lives with the PR).
+#
+# Schema/spec notes (verified 2026-05-23):
+#   - anthropics/claude-code-action@v1 — outputs `branch_name`, no `pr_number`.
+#     PR number is captured via `gh pr list --head` with a short retry.
+#   - Auth uses CLAUDE_CODE_OAUTH_TOKEN (existing secret used by claude.yml).
+#   - System prompts are passed through `prompt:`; the Claude Code CLI on the
+#     runner dispatches to .claude/agents/<name>.md when instructed.
+#   - Job 3 commits with GITHUB_TOKEN — by GitHub's design that push will NOT
+#     retrigger CI on the PR (anti-recursion). Trade-off accepted per the
+#     plan: re-run required checks manually if the handoff-log commit is the
+#     last commit on the branch at merge time.
+
+on:
+    issues:
+        types: [labeled]
+    workflow_dispatch:
+        inputs:
+            issue_number:
+                description: Issue number to (re)run the multi-agent flow on.
+                required: true
+                type: string
+
+# Least-privilege baseline. Each job re-declares what it actually needs.
+permissions:
+    contents: read
+
+# One run per issue. New labelling cancels any in-flight run for the same
+# issue — Anthropic credits are real money; runaway label loops would burn
+# the bank.
+concurrency:
+    group: multi-agent-${{ github.event.issue.number || github.event.inputs.issue_number }}
+    cancel-in-progress: true
+
+env:
+    NODE_VERSION: ${{ vars.NODE_VERSION || '24' }}
+
+jobs:
+    # ------------------------------------------------------------------
+    # Job 1: implementer — runs the implementer subagent, opens a PR.
+    # ------------------------------------------------------------------
+    implementer:
+        name: Implementer subagent
+        # Fire on the `multi-agent` label being added, OR a manual dispatch.
+        # Workflow_dispatch input is integer-validated below before any
+        # use — same pattern as drift-check.yml.
+        if: |
+            (github.event_name == 'issues' && github.event.label.name == 'multi-agent')
+            || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            pull-requests: write
+            issues: write
+            id-token: write
+            actions: read # so Claude can read prior CI results on the PR
+        outputs:
+            issue_number: ${{ steps.guard.outputs.issue_number }}
+            branch_name: ${{ steps.claude.outputs.branch_name }}
+            pr_number: ${{ steps.pr.outputs.pr_number }}
+        steps:
+            - name: Validate inputs
+              id: guard
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  ISSUE_NUMBER_EVENT: ${{ github.event.issue.number }}
+                  ISSUE_NUMBER_INPUT: ${{ github.event.inputs.issue_number }}
+              run: |
+                  set -euo pipefail
+                  if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                      if ! [[ "${ISSUE_NUMBER_INPUT:-}" =~ ^[0-9]+$ ]]; then
+                          echo "::error title=Bad input::issue_number must be a positive integer (got '${ISSUE_NUMBER_INPUT:-}')."
+                          exit 1
+                      fi
+                      echo "issue_number=$ISSUE_NUMBER_INPUT" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "issue_number=$ISSUE_NUMBER_EVENT" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Checkout main
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 1
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+
+            # Anthropic action is third-party — pinned to a 40-char SHA with
+            # a version comment. Tag → commit resolved on 2026-05-23.
+            - name: Run implementer subagent
+              id: claude
+              uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1 (2026-05-23)
+              env:
+                  ISSUE_NUMBER: ${{ steps.guard.outputs.issue_number }}
+              with:
+                  claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+                  # Force branch shape `multi-agent/<issue-number>` so the
+                  # downstream gh pr list lookup is deterministic.
+                  branch_prefix: "multi-agent/"
+                  branch_name_template: "{{prefix}}{{entityNumber}}"
+                  additional_permissions: |
+                      actions: read
+                  # The action passes `prompt:` to the Claude Code CLI, which
+                  # auto-loads `.claude/agents/implementer.md` when instructed
+                  # to use the named subagent. The issue body is read by
+                  # Claude via the GitHub API, not interpolated here — no
+                  # command-injection surface from issue contents.
+                  prompt: |
+                      Use the `implementer` subagent (defined at .claude/agents/implementer.md) to address issue #${{ env.ISSUE_NUMBER }} of repo ${{ github.repository }}.
+
+                      Read AGENTS.md, the path-scoped CLAUDE.md for any directory you touch, and any plan referenced in the issue body before editing. Stay strictly inside the implementer's scoped paths (app/**, components/**, lib/**). Open a pull request on branch multi-agent/${{ env.ISSUE_NUMBER }} when done.
+
+                      If the issue is unclear, the plan is missing, or the requested change is outside scope, refuse and post a comment explaining why instead of editing.
+
+            - name: Capture PR number
+              id: pr
+              env:
+                  BRANCH_NAME: ${{ steps.claude.outputs.branch_name }}
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${BRANCH_NAME:-}" ]; then
+                      echo "::notice title=Multi-agent::Implementer produced no branch — likely refused or made no changes. Downstream jobs will short-circuit."
+                      echo "pr_number=" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  # Push-to-PR propagation can lag a few seconds. Bounded
+                  # retry loop (~30 s total) to avoid spurious empties.
+                  PR_NUMBER=""
+                  for i in 1 2 3 4 5 6; do
+                      PR_NUMBER=$(gh pr list \
+                          --repo "$REPO" \
+                          --head "$BRANCH_NAME" \
+                          --state open \
+                          --json number \
+                          --jq '.[0].number // ""')
+                      if [ -n "$PR_NUMBER" ]; then break; fi
+                      sleep 5
+                  done
+                  if [ -z "$PR_NUMBER" ]; then
+                      echo "::warning title=Multi-agent::Branch '$BRANCH_NAME' was created but no open PR found after 30s. Downstream jobs will short-circuit."
+                  else
+                      echo "::notice title=Multi-agent::Implementer opened PR #$PR_NUMBER on branch '$BRANCH_NAME'."
+                  fi
+                  echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+    # ------------------------------------------------------------------
+    # Job 2: a11y-reviewer — read-only review, posts find-or-update comment.
+    # ------------------------------------------------------------------
+    a11y-reviewer:
+        name: A11y reviewer subagent
+        needs: [implementer]
+        if: needs.implementer.outputs.pr_number != ''
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: write # for the review comment
+            issues: read
+        steps:
+            - name: Checkout implementer's branch
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ needs.implementer.outputs.branch_name }}
+                  fetch-depth: 1
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: ${{ env.NODE_VERSION }}
+
+            - name: Run a11y-reviewer subagent
+              uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1 (2026-05-23)
+              env:
+                  PR_NUMBER: ${{ needs.implementer.outputs.pr_number }}
+              with:
+                  claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+                  prompt: |
+                      Use the `a11y-reviewer` subagent (defined at .claude/agents/a11y-reviewer.md) to review pull request #${{ env.PR_NUMBER }} of repo ${{ github.repository }}.
+
+                      Read AGENTS.md, app/CLAUDE.md, and docs/EVAL.md before scanning. Examine only files matching **/*.tsx and **/*.html in the PR diff. Do not edit any files — your tool list excludes write tools by design.
+
+                      Post the review as a single PR comment containing the marker `<!-- multi-agent:a11y-review -->` on the first line. If a previous comment with the same marker already exists on this PR, update it in place instead of creating a new one.
+
+    # ------------------------------------------------------------------
+    # Job 3: handoff-log — commits the handoff entry to the implementer's
+    # branch so the audit trail lives with the PR. Runs whether or not the
+    # reviewer succeeded — `if: always()` ensures the trail is captured even
+    # when the reviewer fails or finds blocking issues.
+    #
+    # IMPORTANT: this push uses GITHUB_TOKEN. By design, pushes from
+    # GITHUB_TOKEN do not retrigger workflows on the affected PR (anti-
+    # recursion). That means required checks already run on the
+    # implementer's earlier commits stay green, but if the handoff-log
+    # commit IS the latest commit at merge time, reviewers must manually
+    # re-run any required check that needs the freshest commit. See
+    # docs/AGENT_PLAYBOOK.md → "GitHub token semantics".
+    # ------------------------------------------------------------------
+    handoff-log:
+        name: Write handoff log
+        needs: [implementer, a11y-reviewer]
+        if: always() && needs.implementer.outputs.pr_number != ''
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+            pull-requests: read
+            issues: read
+        steps:
+            - name: Checkout implementer's branch
+              uses: actions/checkout@v6
+              with:
+                  ref: ${{ needs.implementer.outputs.branch_name }}
+                  fetch-depth: 0
+                  token: ${{ github.token }}
+
+            - name: Compose handoff entry
+              id: compose
+              env:
+                  ISSUE_NUMBER: ${{ needs.implementer.outputs.issue_number }}
+                  BRANCH_NAME: ${{ needs.implementer.outputs.branch_name }}
+                  PR_NUMBER: ${{ needs.implementer.outputs.pr_number }}
+                  REVIEWER_RESULT: ${{ needs.a11y-reviewer.result }}
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  DATE=$(date -u +%Y-%m-%d)
+                  # Slug comes from issue title — fetched via gh, never
+                  # interpolated. lower-kebab, alphanumerics + dash only.
+                  ISSUE_TITLE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title --jq '.title // ""')
+                  SLUG=$(printf '%s' "$ISSUE_TITLE" \
+                      | tr '[:upper:]' '[:lower:]' \
+                      | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' \
+                      | cut -c1-40)
+                  if [ -z "$SLUG" ]; then SLUG="issue-${ISSUE_NUMBER}"; fi
+
+                  FILE="docs/handoffs/${DATE}-${ISSUE_NUMBER}-${SLUG}.md"
+                  echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+                  # Reviewer-comment URL (best effort — empty if reviewer
+                  # didn't post or job didn't run).
+                  REVIEW_URL=""
+                  if [ "$REVIEWER_RESULT" = "success" ]; then
+                      REVIEW_URL=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+                          --jq '.comments[] | select(.body | contains("<!-- multi-agent:a11y-review -->")) | .url' \
+                          | tail -n 1)
+                  fi
+
+                  mkdir -p docs/handoffs
+                  cat > "$FILE" <<EOF
+                  ---
+                  date: ${DATE}
+                  issue: ${ISSUE_NUMBER}
+                  pr: ${PR_NUMBER}
+                  outcome: iterated
+                  ---
+
+                  ## Trigger
+
+                  - Issue: ${{ github.server_url }}/${REPO}/issues/${ISSUE_NUMBER}
+                  - Label: \`multi-agent\`
+                  - Triggered by: workflow run ${RUN_URL}
+
+                  ## Implementer
+
+                  - Subagent: \`implementer\` (\`.claude/agents/implementer.md\`)
+                  - Branch: \`${BRANCH_NAME}\`
+                  - PR: ${{ github.server_url }}/${REPO}/pull/${PR_NUMBER}
+
+                  ## Reviewer
+
+                  - Subagent: \`a11y-reviewer\` (\`.claude/agents/a11y-reviewer.md\`)
+                  - Reviewer job result: \`${REVIEWER_RESULT}\`
+                  - Review comment: ${REVIEW_URL:-_not posted_}
+
+                  ## Outcome
+
+                  - Result: _fill in after merge_
+                  - Merge SHA: _fill in after merge_
+                  - Anthropic credits (approx): _fill in from action run summary_
+                  - Follow-up: _fill in or 'none'_
+                  EOF
+
+            - name: Commit and push
+              env:
+                  FILE: ${{ steps.compose.outputs.file }}
+                  ISSUE_NUMBER: ${{ needs.implementer.outputs.issue_number }}
+                  BRANCH_NAME: ${{ needs.implementer.outputs.branch_name }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add "$FILE"
+                  if git diff --cached --quiet; then
+                      echo "::notice title=Multi-agent::Handoff entry already up to date — nothing to commit."
+                      exit 0
+                  fi
+                  git commit -m "docs(handoffs): log multi-agent run for issue #${ISSUE_NUMBER}"
+                  git push origin "HEAD:${BRANCH_NAME}"
