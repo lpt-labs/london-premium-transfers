@@ -14,6 +14,7 @@ Operational runbook for agents (Claude Code, Copilot, future custom agents) when
 - [Hooks dependencies](#hooks-dependencies) — what the Claude hooks need installed locally, and how to read the audit log
 - [Memory](#memory) — where agent memory lives across a task's lifetime
 - [Drift detection](#drift-detection) — what the `agent-drift` label means and how to clear it
+- [Conflict detection](#conflict-detection) — what the `agent-conflict` label means and how to clear it
 - [Eval scorecard](#eval-scorecard) — what the `<!-- eval:scorecard -->` comment means and where the raw reports live
 
 ---
@@ -285,6 +286,30 @@ Removing the label by hand without one of those moves is pointless — the next 
 - `dependabot[bot]` PRs are exempt (no Scope block to compare against). Same exemption shape as `plan-gate.yml` and `agent-artifact-check.yml`.
 - Empty or unparseable Scope block → `::notice` + exit 0 (no comment, no label). `plan-gate` enforces Plan presence separately, so drift-check stays silent rather than double-reporting.
 - Unsupported glob character in a Scope entry (`{`, `}`, `?`, `!`) → `::warning` + exit 0. Simplify the entry to the supported subset: literal paths, `*`, `**`, or trailing `/`.
+
+---
+
+## Conflict detection
+
+The `conflict-detect.yml` workflow (see [`WORKFLOWS.md`](WORKFLOWS.md)) compares this PR's changed files against every other open PR's changed files. When two open PRs touch the same path, the workflow posts a find-or-update comment listing the overlapping PR + paths (marker: `<!-- conflict-detect:summary -->`) and applies the `agent-conflict` label.
+
+The check is **informational only** — it never fails the run and is not a required status check. The label is a reviewer cue, not a merge block. Two open PRs touching the same file isn't always a problem (one rebases on the other, the changes are commutative, the second is a no-op after the first merges); the workflow surfaces the situation so reviewers decide.
+
+### How to clear the `agent-conflict` label
+
+Pick one:
+
+- **Rebase or merge in main** — once the other PR lands, rebase this branch on the new main; the overlap disappears on the next push.
+- **Drop the overlapping change here** — if both PRs were touching the file independently, decide which one should own it; remove the change from the loser and let the winner merge first.
+- **Coordinate sequencing with the other PR's author** — leave a comment, agree on order, merge them in sequence. The workflow re-runs after each merge and clears the label on the survivor when no overlap remains.
+
+Removing the label by hand without one of those moves is pointless — the next push reapplies it.
+
+### When the workflow skips
+
+- `dependabot[bot]` PRs are exempt — its PRs routinely overlap on `package.json` and lockfiles alongside other open dep PRs, so the overlap is the rule rather than the exception. Same exemption shape as `plan-gate.yml`, `agent-artifact-check.yml`, and `drift-check.yml`.
+- PR has no changed files (rare) → `::notice` + exit 0.
+- No other open PRs to compare against → `::notice` + exit 0 (comment updated to "✅ No conflicts" on the open PR).
 
 ---
 
