@@ -199,6 +199,11 @@ jobs:
             contents: read
             pull-requests: write # for the review comment
             issues: read
+            # Required by `anthropics/claude-code-action` to mint an OIDC
+            # token for federated auth. Same reason the implementer job
+            # carries it. Missing this caused run 26330236288 to fail with
+            # "Could not fetch an OIDC token" at the start of the action.
+            id-token: write
         steps:
             - name: Checkout implementer's branch
               uses: actions/checkout@v6
