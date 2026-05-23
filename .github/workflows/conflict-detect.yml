@@ -1,0 +1,314 @@
+name: Conflict Check
+
+# Detects when this PR's changed files overlap with files changed by any
+# other open PR. Posts a find-or-update comment listing the conflicting
+# PRs + overlapping paths and toggles an `agent-conflict` label.
+#
+# Informational only on day one — never fails the run, not a required
+# check. Soft-rollout pattern mirrors `drift-check.yml` and
+# `agent-artifact-check.yml`.
+
+on:
+    pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
+        branches: [main]
+    # Manual re-run for a specific PR (e.g., after another PR closes and
+    # we want this one's comment refreshed to "no conflicts").
+    workflow_dispatch:
+        inputs:
+            pr_number:
+                description: PR number to re-check.
+                required: true
+                type: string
+
+# Least-privilege baseline. Each job re-declares what it actually needs.
+permissions:
+    contents: read
+
+# If a new commit lands on the same PR while a previous run is mid-flight,
+# cancel the older run so the comment is always written from the latest sha.
+concurrency:
+    group: conflict-check-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.ref }}
+    cancel-in-progress: true
+
+jobs:
+    # ------------------------------------------------------------------
+    # Job 1: compute overlaps (read-only — no PR writes)
+    # ------------------------------------------------------------------
+    check:
+        name: Compute conflicts
+        # Defensive trigger guard — protects against later additions of
+        # cron/etc. Same pattern as plan-gate.yml and drift-check.yml.
+        # dependabot[bot] is exempt: its PRs routinely touch
+        # `package.json` / lockfiles alongside other open dep PRs, so
+        # overlap is the rule rather than the exception.
+        if: (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && github.actor != 'dependabot[bot]'
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            contents: read
+            pull-requests: read
+        outputs:
+            skipped: ${{ steps.compute.outputs.skipped }}
+            overlap_count: ${{ steps.compute.outputs.overlap_count }}
+            overlap_summary: ${{ steps.compute.outputs.overlap_summary }}
+        steps:
+            - name: Compute conflicts
+              id: compute
+              # All PR-author-controlled values flow through env. PR titles
+              # and branch names of OTHER PRs are sanitised inline before
+              # being placed into the summary table (we strip pipe chars to
+              # protect the Markdown table layout).
+              env:
+                  EVENT_NAME: ${{ github.event_name }}
+                  PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+                  PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  # ---- Resolve PR number for this run ------------------
+                  if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+                      # Validate purely-numeric so unvalidated input can't
+                      # probe arbitrary gh paths.
+                      if ! [[ "${PR_NUMBER_INPUT:-}" =~ ^[0-9]+$ ]]; then
+                          echo "::error title=Bad input::pr_number input must be a positive integer (got '${PR_NUMBER_INPUT:-}')."
+                          exit 1
+                      fi
+                      PR_NUMBER="$PR_NUMBER_INPUT"
+                  else
+                      PR_NUMBER="$PR_NUMBER_EVENT"
+                  fi
+
+                  # ---- This PR's changed files -------------------------
+                  my_files=$(gh pr view "$PR_NUMBER" \
+                      --repo "$REPO" \
+                      --json files \
+                      --jq '.files[].path' | sort -u)
+
+                  if [ -z "$my_files" ]; then
+                      echo "::notice title=Conflict Check::PR has no changed files. Skipping."
+                      {
+                          echo "skipped=true"
+                          echo "overlap_count=0"
+                          echo "overlap_summary<<CONFLICT_EOF"
+                          echo "CONFLICT_EOF"
+                      } >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  # ---- Other open PRs ----------------------------------
+                  # `select(.number != $self)` excludes the current PR by
+                  # number; cast both sides to numbers in jq via tonumber
+                  # to avoid string vs int comparison surprises.
+                  other_prs=$(gh pr list \
+                      --repo "$REPO" \
+                      --state open \
+                      --json number,headRefName,title \
+                      --jq "map(select(.number != ${PR_NUMBER})) | sort_by(.number) | .[]")
+
+                  if [ -z "$other_prs" ]; then
+                      echo "::notice title=Conflict Check::No other open PRs. Nothing to compare against."
+                      {
+                          echo "skipped=false"
+                          echo "overlap_count=0"
+                          echo "overlap_summary<<CONFLICT_EOF"
+                          echo "CONFLICT_EOF"
+                      } >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+
+                  # ---- Compare ------------------------------------------
+                  # For each other open PR, intersect changed-file sets
+                  # using `comm -12` (lines common to both sorted inputs).
+                  # Build a Markdown table of conflicts.
+                  my_tmp=$(mktemp)
+                  printf '%s\n' "$my_files" > "$my_tmp"
+
+                  overlap_count=0
+                  summary_lines=""
+
+                  while IFS= read -r pr_json; do
+                      [ -z "$pr_json" ] && continue
+                      other_number=$(jq -r '.number' <<<"$pr_json")
+                      other_branch=$(jq -r '.headRefName' <<<"$pr_json")
+                      other_title=$(jq -r '.title' <<<"$pr_json")
+
+                      other_files=$(gh pr view "$other_number" \
+                          --repo "$REPO" \
+                          --json files \
+                          --jq '.files[].path' | sort -u)
+
+                      [ -z "$other_files" ] && continue
+
+                      other_tmp=$(mktemp)
+                      printf '%s\n' "$other_files" > "$other_tmp"
+
+                      overlap=$(comm -12 "$my_tmp" "$other_tmp" || true)
+                      rm -f "$other_tmp"
+
+                      [ -z "$overlap" ] && continue
+
+                      overlap_count=$((overlap_count + 1))
+
+                      # Sanitise PR-author content before placing into a
+                      # Markdown table cell: strip pipe chars (the column
+                      # separator) and newlines from titles + branch names.
+                      safe_title=$(printf '%s' "$other_title" | tr -d '|' | tr -d '\n')
+                      safe_branch=$(printf '%s' "$other_branch" | tr -d '|' | tr -d '\n')
+
+                      paths_md=$(printf '%s\n' "$overlap" | awk 'NF {printf "`%s` ", $0}')
+
+                      summary_lines+=$(printf '| #%s | `%s` | %s | %s |\n' \
+                          "$other_number" "$safe_branch" "$safe_title" "$paths_md")
+                  done <<<"$other_prs"
+
+                  rm -f "$my_tmp"
+
+                  if [ "$overlap_count" -gt 0 ]; then
+                      overlap_summary=$(printf '%s' "$summary_lines")
+                  else
+                      overlap_summary=""
+                  fi
+
+                  {
+                      echo "skipped=false"
+                      echo "overlap_count=$overlap_count"
+                      echo "overlap_summary<<CONFLICT_EOF"
+                      echo "$overlap_summary"
+                      echo "CONFLICT_EOF"
+                  } >> "$GITHUB_OUTPUT"
+
+                  if [ "$overlap_count" -gt 0 ]; then
+                      echo "::notice title=Conflict Check::$overlap_count other open PR(s) touch shared files."
+                  else
+                      echo "::notice title=Conflict Check::No conflicts with other open PRs."
+                  fi
+
+    # ------------------------------------------------------------------
+    # Job 2: comment + label (PR write scopes — elevated only here)
+    # ------------------------------------------------------------------
+    report:
+        name: Report conflicts on PR
+        needs: [check]
+        # Don't run if the check job skipped (dependabot, no files,
+        # parser error, etc.). needs.check.result == 'success' is
+        # implicit because we don't override it with always()/failure().
+        if: needs.check.outputs.skipped == 'false'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            pull-requests: write
+            # Labels are issue labels under the hood — needs issues: write.
+            issues: write
+        steps:
+            - name: Ensure agent-conflict label exists
+              # Idempotent: `gh label create` exits non-zero if the label
+              # already exists, so swallow with `|| true`. Mirrors the
+              # pattern from drift-check.yml.
+              env:
+                  REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh label create agent-conflict \
+                      --repo "$REPO" \
+                      --color D93F0B \
+                      --description "Files touched by another open PR" \
+                      2>/dev/null || true
+
+            - name: Update comment and label
+              uses: actions/github-script@v9
+              env:
+                  OVERLAP_COUNT: ${{ needs.check.outputs.overlap_count }}
+                  OVERLAP_SUMMARY: ${{ needs.check.outputs.overlap_summary }}
+                  PR_NUMBER_EVENT: ${{ github.event.pull_request.number }}
+                  PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+                  EVENT_NAME: ${{ github.event_name }}
+                  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                  COMMIT_SHA: ${{ github.sha }}
+              with:
+                  script: |
+                      // HTML-comment marker is invisible in the rendered
+                      // comment but a stable needle for find-or-update.
+                      const MARKER = '<!-- conflict-detect:summary -->';
+                      const LABEL = 'agent-conflict';
+                      const {
+                          OVERLAP_COUNT, OVERLAP_SUMMARY,
+                          PR_NUMBER_EVENT, PR_NUMBER_INPUT, EVENT_NAME,
+                          RUN_URL, COMMIT_SHA,
+                      } = process.env;
+
+                      const issue_number = Number(
+                          EVENT_NAME === 'workflow_dispatch' ? PR_NUMBER_INPUT : PR_NUMBER_EVENT
+                      );
+                      const { owner, repo } = context.repo;
+                      const overlapCount = Number(OVERLAP_COUNT);
+                      const summary = (OVERLAP_SUMMARY || '').trim();
+                      const short = COMMIT_SHA.slice(0, 7);
+
+                      let body;
+                      if (overlapCount > 0) {
+                          body = [
+                              MARKER,
+                              `### Conflict Check — ${short}`,
+                              '',
+                              `⚠️ **${overlapCount} other open PR(s) touch files in this PR:**`,
+                              '',
+                              '| PR | Branch | Title | Overlapping paths |',
+                              '| --- | --- | --- | --- |',
+                              summary,
+                              '',
+                              '_Coordinate with the other PR author(s): rebase, split the change, or sequence the merges. Removing the overlap will clear the label on the next push._',
+                              '',
+                              `- Run: ${RUN_URL}`,
+                              `- Commit: \`${COMMIT_SHA}\``,
+                              '',
+                              '_Informational only — not a blocking check._',
+                          ].join('\n');
+                      } else {
+                          body = [
+                              MARKER,
+                              `### Conflict Check — ${short}`,
+                              '',
+                              '✅ No conflicts with other open PRs.',
+                              '',
+                              `- Run: ${RUN_URL}`,
+                              `- Commit: \`${COMMIT_SHA}\``,
+                          ].join('\n');
+                      }
+
+                      const comments = await github.paginate(
+                          github.rest.issues.listComments,
+                          { owner, repo, issue_number, per_page: 100 },
+                      );
+                      const existing = comments.find(c => c.body && c.body.includes(MARKER));
+
+                      if (existing) {
+                          await github.rest.issues.updateComment({
+                              owner, repo, comment_id: existing.id, body,
+                          });
+                          core.info(`Updated comment ${existing.id}`);
+                      } else {
+                          await github.rest.issues.createComment({
+                              owner, repo, issue_number, body,
+                          });
+                          core.info('Created new conflict comment');
+                      }
+
+                      if (overlapCount > 0) {
+                          await github.rest.issues.addLabels({
+                              owner, repo, issue_number, labels: [LABEL],
+                          });
+                          core.info(`Added label ${LABEL}`);
+                      } else {
+                          try {
+                              await github.rest.issues.removeLabel({
+                                  owner, repo, issue_number, name: LABEL,
+                              });
+                              core.info(`Removed label ${LABEL}`);
+                          } catch (e) {
+                              // 404 = label wasn't applied; that's fine.
+                              if (e.status !== 404) throw e;
+                          }
+                      }
