@@ -161,7 +161,7 @@ sequenceDiagram
         Conflict-->>GH: info comment (+ `agent-conflict` label if files overlap with another open PR)
     and Path guard runs (agent-shaped PRs only)
         GH->>PathGuard: trigger
-        PathGuard-->>GH: passes (no protected paths touched, OR `infra-change` label present); fails the run otherwise. Promotion to required status check is a post-merge UI step in the `protect-main` ruleset.
+        PathGuard-->>GH: passes when no protected paths touched OR infra-change label present, fails the run otherwise (promotion to required status check is a post-merge UI step in the protect-main ruleset)
     and CI runs
         GH->>CI: trigger
         CI->>CI: lint, typecheck, build
