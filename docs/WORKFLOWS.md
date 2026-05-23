@@ -15,6 +15,7 @@ flowchart LR
     DISPATCH([workflow_dispatch / manual])
     DEPENDABOT([Dependabot push])
     VERCEL_DEPLOY_SUCCESS([Vercel preview live])
+    LABEL_MULTI_AGENT([Issue labelled multi-agent])
 
     %% Workflows
     PLAN_GATE[plan-gate.yml]
@@ -23,6 +24,7 @@ flowchart LR
     EVAL[eval.yml]
     AGENT_CI[agent-ci.yml]
     CLAUDE[claude.yml]
+    MULTI_AGENT[multi-agent.yml]
     CLAUDE_REVIEW[claude-code-review.yml]
     PREVIEW[preview-deploy.yml]
     ROLLBACK[agent-rollback.yml]
@@ -37,6 +39,7 @@ flowchart LR
     ARTIFACT[/Workflow artifact<br/>logs-RUN-SHA/]
     ARTIFACT_EVAL[/Workflow artifact<br/>eval-RUN-SHA/]
     BOT_PR[/Bot creates branch + PR/]
+    PR_REVIEW_COMMENT[/A11y review comment/]
     VERCEL_PREVIEW[/Vercel preview URL/]
     PROD_DEPLOY[/Production deploy<br/>via env gate/]
     REVERT_PR[/Revert PR/]
@@ -75,6 +78,11 @@ flowchart LR
     CLAUDE --> BOT_PR
     CLAUDE --> PR_COMMENT
 
+    LABEL_MULTI_AGENT --> MULTI_AGENT
+    DISPATCH --> MULTI_AGENT
+    MULTI_AGENT --> BOT_PR
+    MULTI_AGENT --> PR_REVIEW_COMMENT
+
     DISPATCH --> PREVIEW --> VERCEL_PREVIEW
     DISPATCH --> ROLLBACK --> REVERT_PR
     DISPATCH --> DEPLOY
@@ -85,9 +93,9 @@ flowchart LR
     classDef output fill:#dcfce7,stroke:#16a34a,color:#14532d
     classDef gate fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
 
-    class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT,VERCEL_DEPLOY_SUCCESS trigger
-    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,EVAL,AGENT_CI,CLAUDE,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
-    class PR_COMMENT,LABEL_DRIFT,ARTIFACT,ARTIFACT_EVAL,BOT_PR,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
+    class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT,VERCEL_DEPLOY_SUCCESS,LABEL_MULTI_AGENT trigger
+    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,EVAL,AGENT_CI,CLAUDE,MULTI_AGENT,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
+    class PR_COMMENT,LABEL_DRIFT,ARTIFACT,ARTIFACT_EVAL,BOT_PR,PR_REVIEW_COMMENT,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK output
     class REQUIRED_CHECK gate
 ```
 
@@ -143,6 +151,31 @@ sequenceDiagram
     GH->>Vercel: deploy to production (Vercel handles, not deploy.yml)
 ```
 
+### Multi-agent run on a labelled issue
+
+A second flow, fired when a human labels an issue `multi-agent`. Three sequential jobs in one workflow run: implementer opens a PR, reviewer comments on it, handoff-log commits the audit-trail entry to the same branch.
+
+```mermaid
+sequenceDiagram
+    actor Human
+    participant GH as GitHub
+    participant MA as multi-agent.yml
+    participant Impl as implementer subagent
+    participant Rev as a11y-reviewer subagent
+    participant Log as handoff-log job
+
+    Human->>GH: Label issue `multi-agent`
+    GH->>MA: trigger (issues.labeled)
+    MA->>Impl: job 1 (Claude Code Action)
+    Impl-->>GH: branch `multi-agent/<n>` + open PR
+    MA-->>MA: capture pr_number via gh pr list --head (retry ~30s)
+    MA->>Rev: job 2 (gated on pr_number != "")
+    Rev-->>GH: review comment with marker `<!-- multi-agent:a11y-review -->`
+    MA->>Log: job 3 (if: always() && pr_number != "")
+    Log-->>GH: commit `docs/handoffs/<date>-<n>-<slug>.md` to the same branch
+    Note over Log,GH: Push uses GITHUB_TOKEN — by design does NOT retrigger CI on the PR
+```
+
 ## Workflow-by-workflow
 
 | Workflow | Trigger | Permissions | What it produces | Required check? |
@@ -153,6 +186,7 @@ sequenceDiagram
 | `eval.yml` | `deployment_status` events where `deployment.environment == 'Preview'` and `state == 'success'` (i.e. the Vercel preview is live), plus `workflow_dispatch` with a `pr_number` input for manual re-runs / backfills. Skips for Dependabot PRs (author lookup), for production deployment_status events, and for non-success states. | Workflow baseline `contents: read`. `resolve` job adds `pull-requests: read` for PR/deployment lookups. `summary` job elevates to `pull-requests: write` only — comment-write scope is per-job, not workflow-wide. | Find-or-update PR comment with marker `<!-- eval:scorecard -->` containing the four-tool scorecard table (Lighthouse, axe-core, lychee, type-coverage). Consolidated artifact `eval-<run-id>-<sha>` (90-day retention) bundling `lighthouseci/`, `axe.json`, `lychee.json`, `type-coverage.txt`; per-tool intermediates `eval-<tool>-<run-id>-<sha>` (14-day retention) re-uploaded into the consolidated artifact by the summary job. Always exits 0. | Informational — thresholds, the qual fidelity checklist, and the promotion path documented in [`EVAL.md`](EVAL.md) |
 | `agent-ci.yml` | PR `opened` / `synchronize` on `agent/**` and `feat/**` branches | `contents: read`, `pull-requests: write` | Lint, typecheck, build status checks; PR comment summary; uploaded artifact named `logs-<run-id>-<sha>` | Informational (could be made required via ruleset) |
 | `claude.yml` | Agent mention (currently the trigger string is `@claude`) in issue body/title, issue comment, PR comment, or PR review | `contents: write`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read` | Agent runs the requested task in a runner; commits to a branch; opens/updates a PR; posts a status comment on the originating issue/PR | n/a (not a status check) |
+| `multi-agent.yml` | `issues.labeled` gated on `github.event.label.name == 'multi-agent'`; plus `workflow_dispatch` with integer-validated `issue_number` input for re-runs | Workflow baseline `contents: read`. `implementer` job elevates to `contents: write`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read`. `a11y-reviewer` job uses `contents: read`, `pull-requests: write`, `issues: read` (read-only on disk; write only for the review comment). `handoff-log` job uses `contents: write`, `pull-requests: read`, `issues: read` to commit the audit-trail file. Concurrency-keyed by issue number with `cancel-in-progress: true` to bound Anthropic credit burn. | Branch `multi-agent/<issue-number>` + PR opened by the implementer subagent; a single find-or-update PR review comment with marker `<!-- multi-agent:a11y-review -->`; a committed `docs/handoffs/<date>-<issue>-<slug>.md` entry on the same branch (push by `GITHUB_TOKEN` — by design does not retrigger CI on the PR). | n/a (not a status check) |
 | `claude-code-review.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review` | `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write` | Posts review comments from the official `code-review` plugin | Informational (review comments) |
 | `preview-deploy.yml` | `workflow_dispatch` only | least-privilege per step | Manually-triggered Vercel preview deploy. Real previews come from the Vercel GitHub integration; this workflow exists as a documented reference shape. | n/a |
 | `agent-rollback.yml` | `workflow_dispatch` only — inputs: `sha` (40-char hex, validated), `reason` (string) | `contents: write`, `pull-requests: write` (per-job; baseline is `contents: read`) | Creates `revert/<short-sha>` branch + revert commit + PR with a Plan section so it can pass `plan-gate` on the way back in | n/a |
@@ -172,6 +206,9 @@ sequenceDiagram
 | --- | --- | --- |
 | `.github/workflows/daily-repo-status.md` | GitHub Agentic Workflow (gh-aw) source for a daily 24h activity digest. Would, on activation, open one issue per day with title prefix `[repo-status] ` and label `report`. | gh-aw is not installed in this repo and no GitHub Copilot license is active, so nothing compiles the `.md` into the sibling `.lock.yml` that Actions would run. The `.md` extension alone is invisible to the runner. Frontmatter shape, threat model, and activation steps live in [`docs/COPILOT_STUDY/agentic-workflows.md`](COPILOT_STUDY/agentic-workflows.md). Not in the flowchart or sequence diagram above on purpose — adding a phantom node for a workflow that does not fire would mislead readers. |
 | `.github/workflows/cli-agent-task.yml` | Manually-dispatched workflow showing how the Copilot CLI (`npx @github/copilot-cli`) can be invoked from a CI runner to action a GitHub issue. Takes an `issue` input, validates it, and would call the CLI with `--no-ask-user` to produce a branch + PR. | No GitHub Copilot license is active in this repo, so the step short-circuits with a `::notice` annotation rather than running the CLI. File exists as a syntactic reference for the CLI invocation pattern; the active equivalent is the `@claude` mention trigger in `claude.yml`. Activation context, token semantics, and a comparison to `@claude` are in [`docs/COPILOT_STUDY/cli-in-workflow.md`](COPILOT_STUDY/cli-in-workflow.md). Not in the flowchart — it does not fire in CI. |
+| `.github/agents/implementer.agent.md` | Dormant Copilot custom-agent profile — parity reference for the active Claude subagent at `.claude/agents/implementer.md`. Surgical implementation persona scoped to `app/**`, `components/**`, `lib/**`. | Copilot is configured as a dormant alternative in this repo (no license active), so no Copilot runtime loads the file. Written against the canonical gh custom-agent schema (https://docs.github.com/en/copilot/reference/custom-agents-configuration) verified 2026-05-23 — see DORMANT header. Context lives in [`docs/COPILOT_STUDY/org-custom-agents.md`](COPILOT_STUDY/org-custom-agents.md). |
+| `.github/agents/planner.agent.md` | Dormant Copilot custom-agent profile — parity reference for `.claude/agents/planner.md`. Read-only planning persona; `tools: [read, search, web]` excludes `edit` and `execute`. Renamed and schema-migrated from the older `plan.agent.md` in PR 14. | Same as above — Copilot license dormant. Canonical schema, dated header. Context in [`docs/COPILOT_STUDY/org-custom-agents.md`](COPILOT_STUDY/org-custom-agents.md). |
+| `.github/agents/a11y-reviewer.agent.md` | Dormant Copilot custom-agent profile — parity reference for `.claude/agents/a11y-reviewer.md`. Read-only a11y-review persona; `tools: [read, search]` excludes `edit` and `execute` by design. | Same as above — Copilot license dormant. The read-only tool-list constraint mirrors the workflow's job-level permissions (defence in depth). Context in [`docs/COPILOT_STUDY/org-custom-agents.md`](COPILOT_STUDY/org-custom-agents.md). |
 
 ### External scheduled agents
 
