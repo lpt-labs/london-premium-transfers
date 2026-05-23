@@ -108,6 +108,15 @@ jobs:
                   branch_name_template: "{{prefix}}{{entityNumber}}"
                   additional_permissions: |
                       actions: read
+                  # Open the permission gate so the implementer can actually
+                  # write files in CI. Without this, the action defaults to
+                  # "ask user before each tool call" mode — in a non-
+                  # interactive runner the prompt resolves to deny. Run
+                  # 26327999337 hit 97 such denials over 40 turns and burned
+                  # ~$3 of credits with zero file edits. `acceptEdits` auto-
+                  # accepts Read/Write/Edit/MultiEdit/Glob/Grep without
+                  # changing the workflow job's `permissions:` block.
+                  claude_args: --permission-mode acceptEdits
                   # The action passes `prompt:` to the Claude Code CLI, which
                   # auto-loads `.claude/agents/implementer.md` when instructed
                   # to use the named subagent. The issue body is read by
@@ -183,6 +192,10 @@ jobs:
                   PR_NUMBER: ${{ needs.implementer.outputs.pr_number }}
               with:
                   claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+                  # Reviewer is read-only by design. Plan mode prevents any
+                  # file edits at the runtime gate — defence-in-depth on top
+                  # of the subagent file's `tools:` frontmatter exclusion.
+                  claude_args: --permission-mode plan
                   prompt: |
                       Use the `a11y-reviewer` subagent (defined at .claude/agents/a11y-reviewer.md) to review pull request #${{ env.PR_NUMBER }} of repo ${{ github.repository }}.
 
