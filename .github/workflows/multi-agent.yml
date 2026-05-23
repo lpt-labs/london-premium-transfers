@@ -7,8 +7,11 @@ name: Multi-agent
 #                      same branch (so the audit trail lives with the PR).
 #
 # Schema/spec notes (verified 2026-05-23):
-#   - anthropics/claude-code-action@v1 — outputs `branch_name`, no `pr_number`.
-#     PR number is captured via `gh pr list --head` with a short retry.
+#   - anthropics/claude-code-action@v1 — `branch_name` output proved
+#     unreliable in run 26329802564 (empty even when branch + PR existed),
+#     so the `Capture PR number` step constructs the expected branch name
+#     deterministically from `branch_prefix` + `branch_name_template` and
+#     looks up the PR via `gh pr list --head` with a 5-minute retry.
 #   - Auth uses CLAUDE_CODE_OAUTH_TOKEN (existing secret used by claude.yml).
 #   - System prompts are passed through `prompt:`; the Claude Code CLI on the
 #     runner dispatches to .claude/agents/<name>.md when instructed.
@@ -62,7 +65,10 @@ jobs:
             actions: read # so Claude can read prior CI results on the PR
         outputs:
             issue_number: ${{ steps.guard.outputs.issue_number }}
-            branch_name: ${{ steps.claude.outputs.branch_name }}
+            # branch_name is now set by the `pr` step from the deterministic
+            # template (see comment in that step) — the action's own
+            # branch_name output was unreliable in practice.
+            branch_name: ${{ steps.pr.outputs.branch_name }}
             pr_number: ${{ steps.pr.outputs.pr_number }}
         steps:
             - name: Validate inputs
@@ -145,25 +151,28 @@ jobs:
             - name: Capture PR number
               id: pr
               env:
-                  BRANCH_NAME: ${{ steps.claude.outputs.branch_name }}
+                  # We don't rely on the action's `branch_name` output —
+                  # run 26329802564 showed it empty even when the bot
+                  # successfully created branch + PR. Construct the branch
+                  # name deterministically from the values we configured via
+                  # `branch_prefix` + `branch_name_template`.
+                  EXPECTED_BRANCH: multi-agent/${{ steps.guard.outputs.issue_number }}
                   REPO: ${{ github.repository }}
                   GH_TOKEN: ${{ github.token }}
               run: |
                   set -euo pipefail
-                  if [ -z "${BRANCH_NAME:-}" ]; then
-                      echo "::notice title=Multi-agent::Implementer produced no branch — likely refused or made no changes. Downstream jobs will short-circuit."
-                      echo "pr_number=" >> "$GITHUB_OUTPUT"
-                      exit 0
-                  fi
-                  # Push-to-PR propagation can lag well past the action's exit:
-                  # run 26329092250's PR opened ~3 minutes after Claude finished.
-                  # 30 iterations × 10 s = up to 5 min before we give up. Breaks
-                  # early on first hit so a fast PR-open only costs one cycle.
+                  # Push-to-PR propagation can lag well past the action's exit
+                  # (run 26329092250 showed ~3 minutes). 30 iterations × 10 s
+                  # = up to 5 min before we give up. Breaks early on first hit
+                  # so a fast PR-open only costs one cycle. An empty result
+                  # after the full wait means the implementer refused or made
+                  # no changes — downstream jobs short-circuit on the empty
+                  # `pr_number` output.
                   PR_NUMBER=""
                   for i in $(seq 1 30); do
                       PR_NUMBER=$(gh pr list \
                           --repo "$REPO" \
-                          --head "$BRANCH_NAME" \
+                          --head "$EXPECTED_BRANCH" \
                           --state open \
                           --json number \
                           --jq '.[0].number // ""')
@@ -171,11 +180,12 @@ jobs:
                       sleep 10
                   done
                   if [ -z "$PR_NUMBER" ]; then
-                      echo "::warning title=Multi-agent::Branch '$BRANCH_NAME' was created but no open PR found after 5 min. Downstream jobs will short-circuit."
+                      echo "::warning title=Multi-agent::No open PR on '$EXPECTED_BRANCH' after 5 min — implementer may have refused or made no changes. Downstream jobs will short-circuit."
                   else
-                      echo "::notice title=Multi-agent::Implementer opened PR #$PR_NUMBER on branch '$BRANCH_NAME' after $i polling cycle(s)."
+                      echo "::notice title=Multi-agent::Implementer opened PR #$PR_NUMBER on '$EXPECTED_BRANCH' after $i polling cycle(s)."
                   fi
                   echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+                  echo "branch_name=$EXPECTED_BRANCH" >> "$GITHUB_OUTPUT"
 
     # ------------------------------------------------------------------
     # Job 2: a11y-reviewer — read-only review, posts find-or-update comment.
