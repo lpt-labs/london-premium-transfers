@@ -140,6 +140,8 @@ jobs:
 
                       If the issue is unclear, the plan is missing, or the requested change is outside scope, refuse and post a comment explaining why instead of editing.
 
+                      When you open the PR, the description MUST follow `.github/pull_request_template.md` exactly between the `<!-- PLAN:BEGIN -->` and `<!-- PLAN:END -->` markers. Both `- **Goal:**` AND `- **Steps:**` bullets are required, with `- **Steps:**` followed by at least one numbered item (`1. …`, `2. …`). The `plan-gate` workflow enforces this regex-strictly — see `.github/workflows/plan-gate.yml`. A PR with `## Scope` as a separate H2 heading and no `- **Steps:**` bullet block will fail the required check.
+
             - name: Capture PR number
               id: pr
               env:
@@ -153,10 +155,12 @@ jobs:
                       echo "pr_number=" >> "$GITHUB_OUTPUT"
                       exit 0
                   fi
-                  # Push-to-PR propagation can lag a few seconds. Bounded
-                  # retry loop (~30 s total) to avoid spurious empties.
+                  # Push-to-PR propagation can lag well past the action's exit:
+                  # run 26329092250's PR opened ~3 minutes after Claude finished.
+                  # 30 iterations × 10 s = up to 5 min before we give up. Breaks
+                  # early on first hit so a fast PR-open only costs one cycle.
                   PR_NUMBER=""
-                  for i in 1 2 3 4 5 6; do
+                  for i in $(seq 1 30); do
                       PR_NUMBER=$(gh pr list \
                           --repo "$REPO" \
                           --head "$BRANCH_NAME" \
@@ -164,12 +168,12 @@ jobs:
                           --json number \
                           --jq '.[0].number // ""')
                       if [ -n "$PR_NUMBER" ]; then break; fi
-                      sleep 5
+                      sleep 10
                   done
                   if [ -z "$PR_NUMBER" ]; then
-                      echo "::warning title=Multi-agent::Branch '$BRANCH_NAME' was created but no open PR found after 30s. Downstream jobs will short-circuit."
+                      echo "::warning title=Multi-agent::Branch '$BRANCH_NAME' was created but no open PR found after 5 min. Downstream jobs will short-circuit."
                   else
-                      echo "::notice title=Multi-agent::Implementer opened PR #$PR_NUMBER on branch '$BRANCH_NAME'."
+                      echo "::notice title=Multi-agent::Implementer opened PR #$PR_NUMBER on branch '$BRANCH_NAME' after $i polling cycle(s)."
                   fi
                   echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
