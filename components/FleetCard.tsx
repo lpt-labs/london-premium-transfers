@@ -28,8 +28,8 @@ export default function FleetCard({ vehicle }: FleetCardProps) {
         aria-hidden="true"
         className={`aspect-[4/3] bg-gradient-to-br ${gradient} relative flex items-center justify-center`}
       >
-        <span className="font-sans text-sm font-medium tracking-wide text-paper/70">
-          {vehicle.name}
+        <span className="font-sans text-sm font-medium uppercase tracking-[0.18em] text-paper/70">
+          {classLabel}
         </span>
       </div>
 
@@ -37,9 +37,9 @@ export default function FleetCard({ vehicle }: FleetCardProps) {
         <p className="mb-2 text-xs font-medium uppercase tracking-[0.18em] text-ink-mute">
           {classLabel} &middot; Up to {vehicle.capacity} passengers
         </p>
-        <h3 className="mb-3 text-xl font-normal tracking-tight text-ink">
+        <h2 className="mb-3 text-xl font-normal tracking-tight text-ink">
           {vehicle.name}
-        </h3>
+        </h2>
         <p className="mb-6 text-sm leading-relaxed text-ink-soft">
           {vehicle.description}
         </p>
@@ -54,6 +54,7 @@ export default function FleetCard({ vehicle }: FleetCardProps) {
         <div className="mt-auto">
           <Link
             href="/book"
+            aria-label={`Book the ${vehicle.name}`}
             className="inline-flex items-center rounded-full bg-accent px-6 py-3 text-sm font-medium text-paper transition-colors hover:bg-accent-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
           >
             Book this vehicle
