@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Instrument_Serif, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import Nav from "@/components/Nav";
 
 const sans = Geist({
   variable: "--font-sans",
@@ -35,7 +36,10 @@ export default function RootLayout({
       lang="en"
       className={`${sans.variable} ${serif.variable} ${mono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <Nav />
+        {children}
+      </body>
     </html>
   );
 }
