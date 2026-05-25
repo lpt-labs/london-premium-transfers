@@ -23,9 +23,9 @@ export default function VehicleDetail({ vehicle, detail }: VehicleDetailProps) {
 
         <div className="grid gap-16 lg:grid-cols-[1fr_360px]">
           <div>
-            <section aria-labelledby="about-heading" className="mb-12">
+            <section aria-labelledby={`${vehicle.id}-about-heading`} className="mb-12">
               <h2
-                id="about-heading"
+                id={`${vehicle.id}-about-heading`}
                 className="mb-4 font-sans text-2xl font-normal tracking-tight text-ink"
               >
                 About this vehicle
@@ -35,14 +35,14 @@ export default function VehicleDetail({ vehicle, detail }: VehicleDetailProps) {
               </p>
             </section>
 
-            <section aria-labelledby="features-heading" className="mb-12">
+            <section aria-labelledby={`${vehicle.id}-features-heading`} className="mb-12">
               <h2
-                id="features-heading"
+                id={`${vehicle.id}-features-heading`}
                 className="mb-4 font-sans text-2xl font-normal tracking-tight text-ink"
               >
                 Features
               </h2>
-              <ul className="space-y-2" aria-label={`${vehicle.name} features`}>
+              <ul className="space-y-2">
                 {vehicle.features.map((feature) => (
                   <li
                     key={feature}
@@ -58,14 +58,14 @@ export default function VehicleDetail({ vehicle, detail }: VehicleDetailProps) {
               </ul>
             </section>
 
-            <section aria-labelledby="best-for-heading">
+            <section aria-labelledby={`${vehicle.id}-best-for-heading`}>
               <h2
-                id="best-for-heading"
+                id={`${vehicle.id}-best-for-heading`}
                 className="mb-4 font-sans text-2xl font-normal tracking-tight text-ink"
               >
                 Best for
               </h2>
-              <ul className="space-y-2" aria-label={`${vehicle.name} recommended uses`}>
+              <ul className="space-y-2">
                 {detail.recommendedFor.map((use) => (
                   <li
                     key={use}

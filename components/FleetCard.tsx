@@ -38,7 +38,7 @@ export default function FleetCard({ vehicle }: FleetCardProps) {
           {classLabel} &middot; Up to {vehicle.capacity} passengers
         </p>
         <h2 className="mb-3 text-xl font-normal tracking-tight text-ink">
-          <Link href={`/fleet/${vehicle.id}`} className="hover:underline focus-visible:outline-none focus-visible:underline">{vehicle.name}</Link>
+          <Link href={`/fleet/${vehicle.id}`} className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2">{vehicle.name}</Link>
         </h2>
         <p className="mb-6 text-sm leading-relaxed text-ink-soft">
           {vehicle.description}
