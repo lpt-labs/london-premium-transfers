@@ -30,7 +30,6 @@ flowchart LR
     AGENT_CI[agent-ci.yml]
     CLAUDE[claude.yml]
     MULTI_AGENT[multi-agent.yml]
-    CLAUDE_REVIEW[claude-code-review.yml]
     PREVIEW[preview-deploy.yml]
     ROLLBACK[agent-rollback.yml]
     DEPLOY[deploy.yml]
@@ -98,7 +97,6 @@ flowchart LR
     AGENT_CI --> PR_COMMENT
     AGENT_CI --> ARTIFACT
 
-    PR_OPEN --> CLAUDE_REVIEW --> PR_COMMENT
     PR_OPEN --> CODEQL --> INFO_CHECK
 
     COMMENT -->|contains agent mention| CLAUDE
@@ -121,7 +119,7 @@ flowchart LR
     classDef gate fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
 
     class PR_OPEN,PR_BODY_EDIT,COMMENT,DISPATCH,DEPENDABOT,VERCEL_DEPLOY_SUCCESS,LABEL_MULTI_AGENT,CHECK_SUITE_DONE trigger
-    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,CONFLICT,PATH_GUARD,LEAST_PRIV,AUTOMERGE,EVAL,AGENT_CI,CLAUDE,MULTI_AGENT,CLAUDE_REVIEW,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
+    class PLAN_GATE,ARTIFACT_CHECK,DRIFT,CONFLICT,PATH_GUARD,LEAST_PRIV,AUTOMERGE,EVAL,AGENT_CI,CLAUDE,MULTI_AGENT,PREVIEW,ROLLBACK,DEPLOY,CODEQL workflow
     class PR_COMMENT,LABEL_DRIFT,LABEL_CONFLICT,ARTIFACT,ARTIFACT_EVAL,BOT_PR,PR_REVIEW_COMMENT,VERCEL_PREVIEW,PROD_DEPLOY,REVERT_PR,INFO_CHECK,MERGE output
     class REQUIRED_CHECK,REQUIRED_CHECK_PATHGUARD gate
 ```
@@ -140,7 +138,6 @@ sequenceDiagram
     participant Conflict as conflict-detect.yml
     participant PathGuard as path-guard.yml
     participant CI as agent-ci.yml
-    participant Review as claude-code-review.yml
     participant CodeQL as CodeQL
     participant Vercel as Vercel integration
     participant Human as Human reviewer
@@ -166,9 +163,6 @@ sequenceDiagram
         GH->>CI: trigger
         CI->>CI: lint, typecheck, build
         CI-->>GH: status checks + artifact + PR comment
-    and Review posts
-        GH->>Review: trigger
-        Review-->>GH: review comments (if findings)
     and Security scans
         GH->>CodeQL: trigger
         CodeQL-->>GH: code-scanning alerts (if any)
@@ -226,7 +220,6 @@ sequenceDiagram
 | `agent-ci.yml` | PR `opened` / `synchronize` on `agent/**` and `feat/**` branches | `contents: read`, `pull-requests: write` | Lint, typecheck, build status checks; PR comment summary; uploaded artifact named `logs-<run-id>-<sha>` | Informational (could be made required via ruleset) |
 | `claude.yml` | Agent mention (currently the trigger string is `@claude`) in issue body/title, issue comment, PR comment, or PR review | `contents: write`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read` | Agent runs the requested task in a runner; commits to a branch; opens/updates a PR; posts a status comment on the originating issue/PR | n/a (not a status check) |
 | `multi-agent.yml` | `issues.labeled` gated on `github.event.label.name == 'multi-agent'`; plus `workflow_dispatch` with integer-validated `issue_number` input for re-runs | Workflow baseline `contents: read`. `implementer` job elevates to `contents: write`, `pull-requests: write`, `issues: write`, `id-token: write`, `actions: read`. `a11y-reviewer` job uses `contents: read`, `pull-requests: write`, `issues: read` (read-only on disk; write only for the review comment). `handoff-log` job uses `contents: write`, `pull-requests: read`, `issues: read` to commit the audit-trail file. Concurrency-keyed by issue number with `cancel-in-progress: true` to bound Anthropic credit burn. | Branch `multi-agent/<issue-number>` + PR opened by the implementer subagent; a single find-or-update PR review comment with marker `<!-- multi-agent:a11y-review -->`; a committed `docs/handoffs/<date>-<issue>-<slug>.md` entry on the same branch (push by `GITHUB_TOKEN` — by design does not retrigger CI on the PR). | n/a (not a status check) |
-| `claude-code-review.yml` | PR `opened`, `synchronize`, `reopened`, `ready_for_review` | `contents: read`, `pull-requests: read`, `issues: read`, `id-token: write` | Posts review comments from the official `code-review` plugin | Informational (review comments) |
 | `preview-deploy.yml` | `workflow_dispatch` only | least-privilege per step | Manually-triggered Vercel preview deploy. Real previews come from the Vercel GitHub integration; this workflow exists as a documented reference shape. | n/a |
 | `agent-rollback.yml` | `workflow_dispatch` only — inputs: `sha` (40-char hex, validated), `reason` (string) | `contents: write`, `pull-requests: write` (per-job; baseline is `contents: read`) | Creates `revert/<short-sha>` branch + revert commit + PR with a Plan section so it can pass `plan-gate` on the way back in | n/a |
 | `deploy.yml` | `workflow_dispatch` only, scoped to `main` (no `pull_request`) | least-privilege; the deploy job uses `environment: name: production` | Reference deploy workflow that pauses at the required-reviewer gate. Real production deploys are handled by the Vercel integration; this exists to document the `environment` gate pattern for future workflows that genuinely need it (migrations, secret rotation). | n/a |
@@ -284,7 +277,6 @@ Configured in the `protect-main` ruleset at the org level:
 Informational checks (run on every PR but don't block merge):
 
 - `agent-ci / lint`, `agent-ci / typecheck`, `agent-ci / build`, `agent-ci / PR summary`
-- `Claude Code Review / claude-review`
 - `Code scanning results / CodeQL`
 - `CodeQL / Analyze (actions)`, `CodeQL / Analyze (javascript-typescript)`
 - `least-privilege / Lint workflow permissions` (no plan to promote — soft lint of workflow files)

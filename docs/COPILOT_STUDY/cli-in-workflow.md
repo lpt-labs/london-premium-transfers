@@ -90,7 +90,7 @@ The CLI step passes `COPILOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}`. The Cop
 
 `secrets.GITHUB_TOKEN` is a short-lived token scoped to the current workflow run. It has one important security property: **events triggered by this token do not fire downstream workflows**. GitHub intentionally breaks the recursive-trigger chain so that a bot-opened PR cannot automatically trigger another bot that triggers another bot, ad infinitum.
 
-In practice this means: if the Copilot CLI agent creates a PR using `GITHUB_TOKEN`, the `plan-gate`, `agent-ci`, and `claude-code-review` workflows will **not** automatically run on that PR. A human must push an empty commit or manually re-trigger the checks.
+In practice this means: if the Copilot CLI agent creates a PR using `GITHUB_TOKEN`, the `plan-gate` and `agent-ci` workflows will **not** automatically run on that PR. A human must push an empty commit or manually re-trigger the checks.
 
 The fix, when the chain matters, is to use a **GitHub App installation token** instead. App tokens are issued to an App identity (not the `github-actions[bot]` machine account), and GitHub does not apply the anti-recursion rule to App tokens by default. This is exactly how the `@claude` trigger works in `.github/workflows/claude.yml` — it uses the `ANTHROPIC_API_KEY` and the Claude Code GitHub App, which operates under an App identity that downstream workflows recognise as a real actor.
 
