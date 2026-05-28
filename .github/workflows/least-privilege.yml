@@ -55,7 +55,7 @@ jobs:
     steps:
       - name: Checkout
         # First-party action — major-version tag per .github/workflows/CLAUDE.md.
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Lint workflow files
         id: lint
