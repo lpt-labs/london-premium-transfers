@@ -407,7 +407,7 @@ jobs:
               # `merge-multiple: true` flattens them into one directory so the
               # consolidated artifact has the same shape regardless of which
               # tool produced which file.
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v8
               with:
                   pattern: eval-*-${{ github.run_id }}-${{ github.sha }}
                   path: eval-reports/
