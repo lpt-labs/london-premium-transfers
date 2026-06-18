@@ -90,7 +90,7 @@ jobs:
                   fi
 
             - name: Checkout main
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
               with:
                   fetch-depth: 1
 
@@ -206,7 +206,7 @@ jobs:
             id-token: write
         steps:
             - name: Checkout implementer's branch
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
               with:
                   ref: ${{ needs.implementer.outputs.branch_name }}
                   fetch-depth: 1
@@ -270,7 +270,7 @@ jobs:
             issues: read
         steps:
             - name: Checkout implementer's branch
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
               with:
                   ref: ${{ needs.implementer.outputs.branch_name }}
                   fetch-depth: 0

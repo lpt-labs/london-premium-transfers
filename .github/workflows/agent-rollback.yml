@@ -52,7 +52,7 @@ jobs:
                 echo "::notice title=SHA validated::Input matches ^[0-9a-f]{40}$"
             
             - name: Checkout main (full history)
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
               with:
                 ref: main
                 fetch-depth: 0
