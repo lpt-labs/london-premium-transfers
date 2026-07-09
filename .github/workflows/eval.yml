@@ -301,7 +301,7 @@ jobs:
               #
               # SHA pin: TODO(L3) — look up before merge:
               #   gh api repos/lycheeverse/lychee-action/git/refs/tags/v2 --jq '.object.sha'
-              uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2
+              uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
               id: lychee
               with:
                   args: --max-redirects 5 --no-progress ${{ needs.resolve.outputs.preview_url }}
