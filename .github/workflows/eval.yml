@@ -230,7 +230,7 @@ jobs:
                   corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
 
             - name: Setup Node
-              uses: actions/setup-node@v6
+              uses: actions/setup-node@v7
               with:
                   node-version: ${{ env.NODE_VERSION }}
 
@@ -351,7 +351,7 @@ jobs:
                   corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
 
             - name: Setup Node
-              uses: actions/setup-node@v6
+              uses: actions/setup-node@v7
               with:
                   node-version: ${{ env.NODE_VERSION }}
                   cache: "pnpm"
